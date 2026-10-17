@@ -1,0 +1,148 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./keyframes.css";
+
+/* theme is toggled via html.dark, not prefers-color-scheme */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ──────────────── base (docs/FRONTEND.md §2.4, §6.18, §4.3) ──────────────── */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* rem root stays 16px; the "base font size" setting only changes body text via --app-font-size */
+html {
+  font-size: 16px;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--app-font-size, 13px);
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--app-main);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* §6.18 selection */
+::selection {
+  background: color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+/* §2.2 focus ring (layered so overlays can opt out) */
+@layer base {
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--app-main),
+      0 0 0 4px color-mix(in oklch, var(--accent) 55%, transparent);
+    border-radius: var(--radius-control);
+  }
+}
+
+/* §2.2 inputs inside composite controls: the container switches to border-line-strong via
+   focus-within; the inner field never shows its own ring. Unlayered so it beats the base layer. */
+[data-bare]:focus-visible,
+.composer textarea:focus-visible {
+  box-shadow: none;
+  outline: none;
+}
+
+/* §6.18 scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-3);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+svg.i {
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── animation utilities (§4.2 keyframes; no component defines new ones) ── */
+.anim-fade-up {
+  animation: fade-up 0.3s var(--ease-out-strong) both;
+}
+.anim-fade-in {
+  animation: fade-in 0.35s both;
+}
+.anim-pop-in {
+  animation: pop-in 0.25s var(--ease-out-strong) both;
+}
+.anim-shake {
+  animation: shake 0.36s;
+}
+
+/* §4.3 streaming text tail + caret */
+.stream-tail {
+  filter: blur(1.6px);
+  -webkit-mask-image: linear-gradient(90deg, #000 20%, #0003);
+  mask-image: linear-gradient(90deg, #000 20%, #0003);
+}
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 1.5px;
+  border-radius: 1px;
+  background: var(--ink);
+  vertical-align: text-bottom;
+}
+
+/* §4.3 shimmer text ("进行中" labels) */
+.shimmer-text {
+  background-image: linear-gradient(90deg, var(--ink-3) 35%, var(--ink) 50%, var(--ink-3) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-text 1.4s linear infinite;
+}
+
+/* §4.3 expand/collapse via grid-rows (never animate height) */
+.grid-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  grid-template-columns: minmax(0, 1fr);
+  opacity: 0;
+  transition:
+    grid-template-rows 0.3s var(--ease-out-strong),
+    opacity 0.3s var(--ease-out-strong);
+}
+.grid-collapse > div {
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+.grid-collapse.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}

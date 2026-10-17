@@ -1,0 +1,23 @@
+{
+  "name": "omp-ui",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter '@omp-ui/bridge' dev",
+    "build": "bun run --filter '@omp-ui/web' build",
+    "start": "bun packages/bridge/src/main.ts",
+    "test": "bun test",
+    "typecheck": "bun run --filter '*' typecheck",
+    "sync:wire": "bun packages/protocol/scripts/sync-wire.ts",
+    "test:e2e": "bun run build && playwright test",
+    "smoke:real": "bun run build && node --experimental-strip-types e2e/smoke/real-omp.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/bun": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

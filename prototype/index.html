@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>omp-ui 原型</title>
+<style>
+/* ───────────────── tokens (docs/FRONTEND.md §2) ───────────────── */
+:root{
+  --page:oklch(98.5% .001 286.376);--canvas:oklch(96.1% .002 247.84);--surface:oklch(100% 0 0);
+  --inset:oklch(97.9% .002 247.839);--field:oklch(96.1% .001 286.375);--hover:oklch(97% .002 247.839);
+  --hover-2:oklch(93.3% .003 247.86);--ink:oklch(24.7% .006 258.361);--ink-2:oklch(50.6% .01 264.477);
+  --ink-3:oklch(69.5% .009 264.505);--line:oklch(94.6% .003 264.542);--line-strong:oklch(91.2% .005 258.326);
+  --accent:oklch(62.6% .205 254.947);--accent-ink:oklch(55.6% .187 255.617);--accent-tint:oklch(96% .019 252.878);
+  --green:oklch(60.3% .155 150.883);--green-tint:oklch(95.8% .017 159.118);
+  --orange:oklch(68.9% .179 49.902);--orange-tint:oklch(96.4% .021 67.581);
+  --red:oklch(62.1% .192 23.042);--red-tint:oklch(95.6% .017 17.462);
+  --green-ink:oklch(51.8% .132 150.9);--orange-ink:oklch(54.9% .152 49.9);--red-ink:oklch(54.6% .163 23);--accent-on-tint:oklch(53.6% .159 255.6);
+  --tooltip-bg:oklch(27.2% .008 264.435);--tooltip-fg:oklch(97.6% .002 247.839);--tooltip-muted:oklch(73.1% .008 260.731);--tooltip-border:oklch(35.6% .007 264.474);
+  --scrim:oklch(0% 0 0/.28);
+  --shadow-xs:0 0 4px 0 #0000000a;
+  --shadow-sm:0 18px 47px 0 #00000008,0 7.5px 19px 0 #00000005,0 4px 10.5px 0 #00000005,0 2.3px 5.8px 0 #00000003,0 1.2px 3.1px 0 #00000003,0 .5px 1.3px 0 #00000003;
+  --shadow-md:0 17.54px 23.39px 0 #0000000a,0 9.4px 12.5px 0 #00000008,0 5.25px 7px 0 #00000005,0 2.79px 3.72px -2px #00000003,0 1.16px 1.5px 0 #00000003;
+  --shadow-lg:0 25px 50px 0 #0000000d,0 12px 24px 0 #0000000a,0 6px 12px 0 #00000008,0 3px 6px 0 #00000005,0 1.5px 3px 0 #00000005;
+  --shadow-hairline:0 0 0 1px var(--line);
+  --shadow-btn:0 0 0 1px var(--line-strong),var(--shadow-xs);
+  --shadow-card:0 0 0 1px var(--line),var(--shadow-sm);
+  --shadow-raised:0 0 0 1px var(--line),var(--shadow-md);
+  --shadow-overlay:0 0 0 1px var(--line),var(--shadow-lg);
+  --app-main:var(--page);--app-side:var(--canvas);
+  --r-chip:6px;--r-control:8px;--r-card:10px;--r-window:14px;
+  --ease:cubic-bezier(.23,1,.32,1);--ease-link:cubic-bezier(.16,1,.3,1);
+  --sans:"Inter","PingFang SC","Microsoft YaHei UI","Noto Sans SC",system-ui,sans-serif;
+  --mono:"JetBrains Mono","Cascadia Mono",ui-monospace,"SF Mono",Consolas,monospace;
+}
+html.dark{
+  --page:oklch(20.9% .004 264.477);--canvas:oklch(23.1% .004 264.487);--surface:oklch(26% .006 271.191);
+  --inset:oklch(24.3% .004 264.492);--hover:oklch(28.9% .006 271.22);--hover-2:oklch(31.8% .007 274.747);
+  --ink:oklch(96.4% .002 247.839);--ink-2:oklch(73.1% .008 260.731);--ink-3:oklch(54.1% .01 264.484);
+  --line:oklch(30.8% .006 258.354);--line-strong:oklch(35.6% .007 264.474);--field:oklch(29.3% .006 271.223);
+  --accent:oklch(68% .173 253.301);--accent-ink:oklch(78.8% .113 248.33);--accent-tint:oklch(68% .173 253.301/.16);
+  --green:oklch(70.5% .154 153.814);--green-tint:oklch(70.5% .154 153.814/.14);
+  --orange:oklch(74.6% .156 55.642);--orange-tint:oklch(74.6% .156 55.642/.14);
+  --red:oklch(66.6% .18 21.433);--red-tint:oklch(66.6% .18 21.433/.14);
+  --green-ink:oklch(78% .123 153.8);--orange-ink:oklch(80.6% .125 55.6);--red-ink:oklch(77.6% .144 21.4);--accent-on-tint:var(--accent-ink);
+  --scrim:oklch(0% 0 0/.5);
+  --shadow-btn:0 0 0 1px oklch(100% 0 0/.1),0 1px 2px oklch(0% 0 0/.3);
+  --shadow-card:0 0 0 1px oklch(100% 0 0/.11),0 1px 2px oklch(0% 0 0/.2),0 2px 6px oklch(0% 0 0/.2);
+  --shadow-raised:0 0 0 1px oklch(100% 0 0/.13),0 2px 10px oklch(0% 0 0/.22);
+  --shadow-overlay:0 0 0 1px oklch(100% 0 0/.15),0 8px 28px oklch(0% 0 0/.34);
+  --app-main:var(--canvas);--app-side:var(--page);
+  color-scheme:dark;
+}
+@property --beam{syntax:"<angle>";inherits:false;initial-value:0deg}
+
+/* ───────────────── keyframes (§4.2) ───────────────── */
+@keyframes fade-up{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
+@keyframes pop-in{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(1turn)}}
+@keyframes shimmer-text{0%{background-position:150%}to{background-position:-50%}}
+@keyframes pixel-on{0%,to{opacity:.15}18%,42%{opacity:1}62%{opacity:.15}}
+@keyframes shake{0%,to{transform:none}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-2px)}80%{transform:translateX(2px)}}
+@keyframes check-draw{from{stroke-dashoffset:24}to{stroke-dashoffset:0}}
+@keyframes pulse-dot{0%,to{opacity:1}50%{opacity:.35}}
+@keyframes beam{to{--beam:360deg}}
+@keyframes countdown{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+@media (prefers-reduced-motion:reduce){*,::before,::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}.stream-tail{filter:none!important;mask-image:none!important}.composer.running::before{display:none}}
+
+/* ───────────────── base ───────────────── */
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{font:13px/1.4 var(--sans);color:var(--ink);background:var(--app-main);-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+input,textarea{font:inherit;color:inherit}
+::selection{background:color-mix(in oklch,var(--accent) 22%,transparent)}
+:focus-visible{outline:none;box-shadow:0 0 0 2px var(--app-main),0 0 0 4px color-mix(in oklch,var(--accent) 55%,transparent);border-radius:var(--r-control)}
+.mono{font-family:var(--mono)}
+.tnum{font-variant-numeric:tabular-nums}
+.ink2{color:var(--ink-2)}.ink3{color:var(--ink-3)}
+svg.i{flex-shrink:0;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:999px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background-color:var(--ink-3)}
+
+.shimmer{background-image:linear-gradient(90deg,var(--ink-3) 35%,var(--ink) 50%,var(--ink-3) 65%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-text 1.4s linear infinite}
+.kbd{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;border-radius:5px;background:var(--surface);box-shadow:var(--shadow-hairline);font:10.5px var(--mono);color:var(--ink-2)}
+.ibtn{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--r-control);color:var(--ink-3);transition:background-color .1s,color .1s,transform .2s}
+.ibtn:hover{background:var(--hover-2);color:var(--ink-2)}
+.ibtn:active{transform:scale(.96)}
+.ibtn.sm{width:24px;height:24px;border-radius:6px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 6px;border-radius:var(--r-chip);background:var(--field);box-shadow:var(--shadow-hairline);font-size:11.5px;color:var(--ink-2);white-space:nowrap}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;font-size:11.5px;font-weight:500}
+.pill.green{background:var(--green-tint);color:var(--green-ink)}.pill.red{background:var(--red-tint);color:var(--red-ink)}.pill.orange{background:var(--orange-tint);color:var(--orange-ink)}
+.btn{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 10px;border-radius:var(--r-control);font-size:12.5px;font-weight:500;transition:background-color .1s,transform .2s}
+.btn:active{transform:scale(.96)}
+.btn.secondary{background:var(--surface);box-shadow:var(--shadow-btn)}.btn.secondary:hover{background:var(--hover)}
+.btn.primary{background:var(--ink);color:var(--surface);box-shadow:inset 0 1px 0 rgba(255,255,255,.14)}
+.btn.primary .kbd{background:rgb(255 255 255/.15);box-shadow:none;color:inherit}
+html.dark .btn.primary .kbd{background:rgb(0 0 0/.12)}
+.card{background:var(--surface);border-radius:var(--r-card);box-shadow:var(--shadow-card);overflow:hidden}
+.collapse{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .3s var(--ease),opacity .3s var(--ease)}
+.collapse>div{overflow:hidden;min-height:0}
+.open>.collapse,.collapse.open{grid-template-rows:1fr;opacity:1}
+.chev{transition:transform .2s var(--ease)}
+.spinner{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--line-strong);border-top-color:var(--ink-2);animation:spin .7s linear infinite}
+.pixels{display:grid;grid-template-columns:repeat(3,4px);gap:1.5px}
+.pixels span{width:4px;height:4px;border-radius:1px;background:var(--ink);opacity:.15}
+.pixels.sm{grid-template-columns:repeat(3,3px);gap:1px}.pixels.sm span{width:3px;height:3px}
+.fade-up{animation:fade-up .3s var(--ease) both}
+
+/* ───────────────── shell ───────────────── */
+.app{display:grid;grid-template-columns:264px 1px minmax(0,1fr) 1px 340px;height:100vh}
+.app.no-right{grid-template-columns:264px 1px minmax(0,1fr) 0 0}
+.app.no-right .right,.app.no-right .vsep.r{display:none}
+.vsep{background:var(--line)}
+.side,.right{background:var(--app-side);min-height:0;display:flex;flex-direction:column}
+
+/* sidebar */
+.side{padding:8px}
+.brand{display:flex;align-items:center;gap:10px;height:44px;padding:0 6px}
+.logo{width:28px;height:28px;border-radius:8px;background:var(--ink);color:var(--surface);display:grid;place-items:center;font-weight:600;font-size:14px}
+.newchat{display:flex;align-items:center;width:100%;height:32px;padding:0 8px;margin:4px 0 6px;border-radius:var(--r-control);color:var(--accent);font-weight:500;transition:background-color .1s,transform .1s}
+.newchat:hover{background:var(--accent-tint)}.newchat:active{transform:scale(.96)}
+.newchat .plus{margin-left:auto;width:16px;height:16px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center}
+.newchat .kbd{margin-left:auto;margin-right:8px;opacity:0;transition:opacity .15s}.newchat:hover .kbd{opacity:1}
+.search{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:var(--r-control);background:var(--inset);box-shadow:var(--shadow-hairline);color:var(--ink-3)}
+.search input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:12.5px}
+.search input::placeholder{color:var(--ink-3)}
+.nav{position:relative;flex:1;overflow:auto;margin-top:6px}
+.nav .hl{position:absolute;left:0;right:0;border-radius:7px;background:var(--hover-2);pointer-events:none;transition:top .22s var(--ease),height .22s var(--ease),opacity .15s}
+.glabel{display:flex;align-items:center;gap:4px;padding:12px 8px 4px;font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.glabel .ga{margin-left:auto;display:flex;gap:2px;opacity:0;transition:opacity .1s}.glabel:hover .ga{opacity:1}
+.glabel .ga button{width:18px;height:18px;border-radius:5px;display:grid;place-items:center;color:var(--ink-3)}.glabel .ga button:hover{background:var(--hover-2);color:var(--ink-2)}
+.srow{position:relative;z-index:1;display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 8px;border-radius:7px;text-align:left;transition:transform .15s}
+.srow:active{transform:scale(.98)}
+.srow .st{width:14px;display:grid;place-items:center;flex-shrink:0}
+.srow .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-2)}
+.srow.cur .t{color:var(--ink);font-weight:500}
+.srow .time{font-size:11.5px;color:var(--ink-2)}
+.srow .more{display:none;width:20px;height:20px;border-radius:5px;place-items:center;color:var(--ink-3)}
+.srow:hover .time{display:none}.srow:hover .more{display:grid}
+.dot{width:6px;height:6px;border-radius:50%}
+.side-foot{display:flex;align-items:center;gap:2px;padding-top:6px;border-top:1px solid var(--line)}
+
+/* main */
+.main{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0}
+.hdr{display:flex;align-items:center;gap:8px;height:44px;padding:0 16px;flex-shrink:0;border-bottom:1px solid transparent;transition:border-color .15s}
+.hdr.scrolled{border-color:var(--line)}
+.hdr .title{font-weight:500;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hdr .sp{flex:1}
+.ctx{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 6px;border-radius:var(--r-control);color:var(--ink-2);font-size:12px}
+.ctx:hover{background:var(--hover-2)}
+.scroll{flex:1;overflow:auto;min-height:0}
+.col{max-width:760px;margin:0 auto;padding:16px 24px 180px}
+
+/* messages */
+.user{display:flex;flex-direction:column;align-items:flex-end;padding-left:64px;margin:24px 0}
+.bubble{background:var(--field);border-radius:14px;padding:8px 14px;font-size:14.5px;line-height:1.65;white-space:pre-wrap}
+.uact{display:flex;gap:2px;margin-top:4px;opacity:0;transition:opacity .15s}.user:hover .uact{opacity:1}
+.turn{display:flex;flex-direction:column;gap:10px}
+.think-h{display:inline-flex;align-items:center;gap:8px;width:fit-content;margin-left:-6px;padding:4px 6px;border-radius:var(--r-control);transition:background-color .1s}
+.think-h:hover{background:var(--hover-2)}
+.think-h .lbl{font-weight:500;font-size:13px;color:var(--ink-2)}
+.trace{position:relative;margin:4px 0 0 5px;padding:4px 0 4px 16px;font-size:12.5px;line-height:1.65;color:var(--ink-2)}
+.trace::before{content:"";position:absolute;left:3px;top:-4px;bottom:2px;width:1px;background:var(--line)}
+.prose{font-size:14.5px;line-height:1.65}
+.prose p+p,.prose p+ul,.prose ul+p{margin-top:.75em}
+.prose ul{padding-left:1.25em}.prose li::marker{color:var(--ink-3)}
+.prose code{font:.9em var(--mono);background:var(--field);padding:1px 5px;border-radius:5px}
+.prose a{color:var(--accent-ink);text-decoration:none;position:relative}
+.prose a::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:currentColor;transform:scaleX(0);transform-origin:0;transition:transform .28s var(--ease-link)}
+.prose a:hover::after{transform:scaleX(1)}
+.stream-tail{filter:blur(1.6px);-webkit-mask-image:linear-gradient(90deg,#000 20%,#0003);mask-image:linear-gradient(90deg,#000 20%,#0003)}
+.caret{display:inline-block;width:2px;height:1.05em;margin-left:1.5px;border-radius:1px;background:var(--ink);vertical-align:text-bottom}
+
+/* tool run */
+.run-h{display:inline-flex;align-items:center;gap:6px;width:fit-content;margin-left:-6px;padding:4px 6px;border-radius:var(--r-control);font-size:12.5px;color:var(--ink-2);transition:background-color .1s}
+.run-h:hover{background:var(--hover-2)}
+.rows{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+.trow{display:flex;align-items:center;gap:8px;width:calc(100% + 6px);height:28px;margin-left:-3px;padding:0 3px;border-radius:var(--r-control);text-align:left;transition:background-color .1s}
+.trow:hover{background:var(--hover-2)}
+.trow .ic{position:relative;width:16px;height:16px;display:grid;place-items:center;color:var(--ink-3)}
+.trow .ic>*{grid-area:1/1;transition:opacity .1s,transform .15s}
+.trow .ic .cv{opacity:0;transform:rotate(-90deg)}
+.trow:hover .ic .base,.tool.open .ic .base{opacity:0}
+.trow:hover .ic .cv,.tool.open .ic .cv{opacity:1}
+.tool.open .ic .cv{transform:none}
+.trow .lab{font-size:12.5px;font-weight:500;flex-shrink:0}
+.trow .tchip{flex:1;min-width:0;display:block;height:22px;line-height:22px;padding:0 6px;border-radius:var(--r-chip);background:var(--hover-2);box-shadow:var(--shadow-hairline);font-size:11.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+html.dark .trow .tchip{background:var(--field)}
+.trow .meta{font:11.5px var(--mono);color:var(--ink-2);flex-shrink:0}
+.add{color:var(--green-ink)}.del{color:var(--red-ink)}
+.detail{margin:2px 0 4px 8px;padding:2px 0 2px 14px;border-left:1px solid var(--line)}
+.term{position:relative;background:var(--inset);box-shadow:var(--shadow-hairline);border-radius:8px;padding:8px 10px;font:11.5px/1.6 var(--mono);color:var(--ink-2);max-height:320px;overflow:auto;white-space:pre}
+.term .cmd{color:var(--ink)}
+.term .pill{position:absolute;top:6px;right:6px;height:20px;font-family:var(--sans)}
+.diffchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.dchip{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border-radius:var(--r-chip);background:var(--surface);box-shadow:var(--shadow-btn);font:11.5px var(--mono);transition:background-color .1s}
+.dchip:hover{background:var(--hover)}
+.actions{display:flex;align-items:center;gap:2px;margin-top:2px}
+.actions .m{margin-left:auto;font-size:11.5px;color:var(--ink-2);opacity:0;transition:opacity .15s}
+.turn:hover .actions .m{opacity:1}
+
+/* approval */
+.appr{position:relative;margin:2px 0 4px}
+.appr .bar{position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent);transform-origin:left;animation:countdown 60s linear both}
+.appr .body{padding:12px}
+.appr .q{display:flex;align-items:center;gap:8px;font-weight:500}
+.appr .why{margin-top:4px;font-size:12px;color:var(--ink-2)}
+.appr .pre{margin-top:8px;background:var(--inset);box-shadow:var(--shadow-hairline);border-radius:8px;padding:8px 10px;font:11.5px/1.6 var(--mono);white-space:pre;overflow:auto}
+.appr .foot{display:flex;align-items:center;gap:8px;padding:10px;border-top:1px solid var(--line)}
+.cb{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-2);cursor:pointer}
+.cb .box{width:16px;height:16px;border-radius:5px;box-shadow:inset 0 0 0 1.5px var(--line-strong);display:grid;place-items:center;color:transparent;transition:background-color .2s,color .2s}
+.cb.on .box{background:var(--ink);color:var(--canvas);box-shadow:none}
+
+/* run indicator */
+.runind{display:flex;align-items:center;gap:10px;margin-top:12px}
+.runind.waiting .pixels span{animation:none!important;opacity:.15}
+.runind.waiting .lbl{color:var(--orange-ink)}
+.runind .lbl{font-size:13px;font-weight:500}
+.runind .tm{font:12px var(--mono);color:var(--ink-2)}
+
+/* composer */
+.dock{position:absolute;left:0;right:0;bottom:0;pointer-events:none}
+.dock::before{content:"";position:absolute;inset:-32px 0 0;background:linear-gradient(transparent,var(--app-main) 32px);z-index:-1}
+.dock .col{padding:0 24px 16px;pointer-events:auto}
+.queue{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.qchip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 4px 0 8px;border-radius:999px;background:var(--surface);box-shadow:var(--shadow-btn);font-size:12px;animation:pop-in .2s var(--ease) both}
+.qchip .k{font-size:11px;color:var(--accent-ink);font-weight:500}
+.composer{position:relative;isolation:isolate;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-card);padding:10px 12px 8px;transition:border-color .15s}
+.composer:focus-within{border-color:var(--line-strong)}
+.composer.running::before{content:"";position:absolute;inset:-2px;border-radius:18px;padding:1px;background:conic-gradient(from var(--beam),transparent 0 70%,color-mix(in oklch,var(--accent) 70%,transparent) 85%,transparent 100%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:.55;animation:beam 2.4s linear infinite;pointer-events:none;transition:opacity .3s}
+/* §6.12 fixed two-row card: textarea 14/22 (min 44) + controls row 32 */
+.ctext{display:block;width:100%;resize:none;border:0;outline:0;background:transparent;font-size:14px;line-height:22px;padding:0;min-height:44px;max-height:40vh}
+.ctext::placeholder{color:var(--ink-3)}
+.crow{display:flex;align-items:center;justify-content:space-between;gap:8px;height:32px;margin-top:4px}
+.crow .l,.crow .r{display:flex;align-items:center;gap:4px}
+.pchip,.mbtn,.pbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 8px;border-radius:var(--r-control);font-size:13px;transition:background-color .15s,transform .2s}
+.pchip:hover,.mbtn:hover{background:var(--hover)}.pbtn:hover{background:var(--hover-2)}
+.pchip:active,.mbtn:active,.pbtn:active{transform:scale(.94)}
+.pchip{font-weight:500;color:var(--ink-2)}
+.pchip.yolo{color:var(--orange-ink)}.pchip.yolo svg{color:var(--orange)}
+.mbtn b{font-weight:500;color:var(--ink)}.mbtn .t{color:var(--ink-2)}
+.pbtn{font-weight:500;color:var(--ink)}
+/* §6.12 context strip (welcome only): the card overlaps its lower 10px */
+.cstrip{display:flex;align-items:center;height:40px;padding:0 14px 10px;background:var(--field);border-radius:14px 14px 0 0}
+.cstrip + .composer{z-index:1;margin-top:-10px}
+.send{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--ink);color:var(--surface);box-shadow:inset 0 1px 0 rgba(255,255,255,.14);transition:transform .2s,background-color .2s}
+.send:active{transform:scale(.94)}
+.send.off{background:var(--line-strong);color:var(--ink-2);box-shadow:none}
+.send .sq{width:10px;height:10px;border-radius:2px;background:currentColor}
+.hint{margin-top:6px;text-align:center;font-size:11.5px;color:var(--ink-2)}
+
+/* right panel */
+.tabs{display:flex;align-items:center;gap:2px;height:44px;padding:0 6px;flex-shrink:0}
+.tab{position:relative;padding:3px 8px;border-radius:6px;font-size:13px;opacity:.5;transition:opacity .1s,background-color .1s}
+.tab:hover{opacity:.75}.tab.on{opacity:1;background:var(--field)}
+.tab .nd{position:absolute;top:2px;right:2px;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.rbody{flex:1;overflow:auto;padding:4px 12px 12px;display:flex;flex-direction:column;gap:8px}
+.phase{padding:8px 2px 2px;font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.task{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 10px;border-bottom:1px solid var(--line)}
+.task:last-child{border-bottom:0}
+.task .tx{flex:1;min-width:0;font-size:12.5px}
+.task.done .tx{color:var(--ink-2)}
+.task.aband .tx{color:var(--ink-3);text-decoration:line-through}
+.badge{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;color:#fff;flex-shrink:0}
+.ring{position:relative;width:24px;height:24px;flex-shrink:0;display:grid;place-items:center;font-size:10.5px;font-weight:600}
+.ring svg{position:absolute;inset:0}
+.ring.active svg{animation:spin 1.1s linear infinite}
+.capsule{background:var(--surface);box-shadow:var(--shadow-card);border-radius:22px;transition:border-radius .3s}
+.capsule.open{border-radius:14px}
+.caprow{display:flex;align-items:center;gap:10px;height:44px;padding:0 10px;width:100%;text-align:left}
+.caprow .n{font-weight:500}
+.caprow .d{flex:1;min-width:0;color:var(--ink-2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.capdet{display:grid;grid-template-columns:22px 1fr;gap:10px;padding:0 10px 10px}
+.capdet .vl{width:1px;margin:0 auto;background:var(--line)}
+.kv{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);line-height:22px}
+.kv .mono{font-size:11.5px}
+
+/* toolbar for prototype only */
+.proto{position:fixed;bottom:12px;right:12px;z-index:50;display:flex;gap:2px;padding:3px;border-radius:10px;background:var(--surface);box-shadow:var(--shadow-raised)}
+.proto button{padding:4px 10px;border-radius:7px;font-size:12px;color:var(--ink-2)}
+.proto button.on{background:var(--field);color:var(--ink);font-weight:500}
+
+/* scene: components */
+.gal{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:1080px;margin:0 auto;padding:64px 24px 48px}
+.gal h4{font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:8px}
+.cbar{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line)}
+.code{background:var(--inset);padding:10px 12px;font:12.5px/1.7 var(--mono);white-space:pre;overflow:auto}
+.code .ln{display:inline-block;width:20px;text-align:right;margin-right:12px;color:var(--ink-3);opacity:.6}
+.k{color:var(--accent-ink)}.s{color:var(--green)}.n{color:var(--orange)}.f{color:var(--ink)}.c{color:var(--ink-3);font-style:italic}.p{color:var(--ink-3)}.v{color:var(--ink-2)}
+.diff{background:var(--inset);font:12px/1.7 var(--mono);overflow-x:auto;color:var(--ink-2)}
+.diff .l{display:grid;grid-template-columns:40px 40px 14px 1fr;padding-right:12px;min-width:max-content;white-space:pre}
+.diff .l.a{color:var(--ink)}
+.diff .l>span:nth-child(-n+2){text-align:right;padding-right:6px;color:var(--ink-3);opacity:.6;font-size:11px}
+.diff .l.a{background:var(--green-tint)}.diff .l.a>span:nth-child(3){color:var(--green)}
+.diff .l.d{background:var(--red-tint);color:var(--ink-2)}.diff .l.d>span:nth-child(3){color:var(--red)}
+.diff .l.h{background:var(--field);color:var(--ink-2);font-size:11.5px;grid-template-columns:1fr;padding:2px 12px}
+.menu{background:var(--surface);box-shadow:var(--shadow-raised);border-radius:var(--r-card);padding:4px;position:relative}
+.menu .hl{position:absolute;left:4px;right:4px;border-radius:6px;background:var(--hover);transition:top .22s var(--ease),height .22s var(--ease)}
+.mrow{position:relative;z-index:1;display:flex;align-items:center;gap:10px;height:36px;padding:0 8px;border-radius:6px;width:100%;text-align:left}
+.mrow .nm{font-size:12.5px;font-weight:500}.mrow .ds{flex:1;min-width:0;font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow .src{font-size:11px;color:var(--ink-2)}
+.mfoot{margin-top:4px;padding:6px 8px 4px;border-top:1px solid var(--line);font-size:11px;color:var(--ink-2)}
+.banner{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-card);font-size:13px}
+.banner.orange{background:var(--orange-tint)}.banner.red{background:var(--red-tint)}
+.banner.orange b{color:var(--orange-ink)!important}.banner.red b{color:var(--red-ink)!important}
+.toast{display:flex;align-items:center;gap:10px;width:340px;padding:10px 12px;border-radius:var(--r-card);background:var(--surface);box-shadow:var(--shadow-raised);font-size:12.5px}
+.ask .opt{display:flex;align-items:center;gap:8px;margin:0 -6px;padding:0 6px;min-height:28px;border-radius:var(--r-control);width:calc(100% + 12px);text-align:left;color:var(--ink-2);transition:background-color .1s,color .2s}
+.ask .opt:hover{background:var(--hover)}
+.ask .opt.on{color:var(--ink)}
+.radio{width:16px;height:16px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--line-strong);display:grid;place-items:center;flex-shrink:0;transition:background-color .2s}
+.radio i{width:6px;height:6px;border-radius:50%;background:var(--canvas);transform:scale(0);transition:transform .2s}
+.opt.on .radio{background:var(--ink);box-shadow:none}.opt.on .radio i{transform:scale(1)}
+.rec{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:999px;background:var(--accent-tint);color:var(--accent-on-tint);font-size:11px;font-weight:500}
+.pdots{display:flex;align-items:center;gap:4px}
+.pdots i{border-radius:50%}
+.dialog-demo{position:relative;height:260px;border-radius:var(--r-card);overflow:hidden;background:var(--app-main);box-shadow:var(--shadow-hairline)}
+.dialog-demo .scrim{position:absolute;inset:0;background:var(--scrim)}
+.dialog-demo .dlg{position:absolute;left:50%;top:50%;width:380px;transform:translate(-50%,-50%);background:var(--surface);border-radius:var(--r-window);box-shadow:var(--shadow-overlay);padding:16px}
+.btn.danger{background:var(--red);color:#fff}
+
+/* welcome */
+.welcome{max-width:760px;margin:0 auto;padding:32vh 24px 0}
+.welcome h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin:16px 0 0}
+.fu{display:flex;align-items:center;gap:8px;margin:0 -6px;padding:0 6px;height:32px;border-radius:7px;border-bottom:1px solid var(--line);font-size:12.5px;width:calc(100% + 12px);text-align:left;transition:background-color .1s}
+.fu:hover{background:var(--hover-2)}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<div class="proto" role="toolbar" aria-label="原型场景">
+  <button data-scene="chat" class="on">对话 · 运行中</button>
+  <button data-scene="ask">提问</button>
+  <button data-scene="welcome">欢迎页</button>
+  <button data-scene="gallery">组件</button>
+  <button id="theme" aria-label="切换明暗">◐ 明暗</button>
+</div>
+
+<div class="app" id="app">
+  <!-- ───────────── sidebar ───────────── -->
+  <aside class="side" aria-label="会话">
+    <div class="brand">
+      <div class="logo">π</div>
+      <div><div style="font-weight:500">omp</div><div style="font-size:11.5px" class="ink2">18.11.1</div></div>
+      <button class="ibtn" style="margin-left:auto" aria-label="折叠侧边栏" data-i="panelLeft"></button>
+    </div>
+    <button class="newchat"><span>新对话</span><span class="kbd">Ctrl N</span><span class="plus" data-i="plus9"></span></button>
+    <label class="search"><span data-i="search12"></span><input placeholder="搜索会话" aria-label="搜索会话" /><span class="kbd">Ctrl K</span></label>
+    <nav class="nav" id="nav">
+      <span class="hl" aria-hidden="true"></span>
+      <div class="glabel">omp-ui</div>
+      <button class="srow cur" aria-current="page"><span class="st"><span class="pixels sm" data-pixels></span></span><span class="t">设计前端并实现 Bridge</span><span class="time">刚刚</span></button>
+      <button class="srow"><span class="st"><span class="dot" style="background:var(--orange);animation:pulse-dot 1.6s infinite"></span></span><span class="t">审批流程联调</span><span class="time">12 分钟</span></button>
+      <button class="srow"><span class="st"></span><span class="t">RPC 帧夹具录制</span><span class="time">2 小时</span></button>
+      <div class="glabel">oh-my-pi</div>
+      <button class="srow"><span class="st"><span class="dot" style="background:var(--accent)"></span></span><span class="t">修复 grep 工具的 Windows 路径</span><span class="time">昨天</span></button>
+      <button class="srow"><span class="st"><span class="dot" style="background:var(--red)"></span></span><span class="t">升级 tailwind v4</span><span class="time">昨天</span></button>
+      <button class="srow"><span class="st"></span><span class="t">解释 session 树结构</span><span class="time">周一</span></button>
+      <div class="glabel">school</div>
+      <button class="srow"><span class="st"></span><span class="t">OS Lab 3 页表实现</span><span class="time">9月28日</span></button>
+      <button class="srow"><span class="st"></span><span class="t">汇编示例逐行讲解</span><span class="time">9月20日</span></button>
+    </nav>
+    <div class="side-foot">
+      <button class="ibtn" aria-label="设置" data-i="settings"></button>
+      <button class="ibtn" aria-label="诊断" data-i="activity"></button>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px" class="ink2"><span class="dot" style="background:var(--green)"></span>已连接</span>
+    </div>
+  </aside>
+  <div class="vsep"></div>
+
+  <!-- ───────────── main ───────────── -->
+  <main class="main">
+    <header class="hdr" id="hdr">
+      <span class="title" id="hdrTitle">设计前端并实现 Bridge</span>
+      <span class="chip mono hx">~/Desktop/code/tools/omp-ui</span>
+      <span class="sp"></span>
+      <span class="chip hx" style="background:transparent;box-shadow:none">lsp: ts ready</span>
+      <button class="ctx hx" aria-label="上下文用量 42%"><svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" fill="none" stroke="var(--line)" stroke-width="2"/><circle cx="9" cy="9" r="7" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-linecap="round" stroke-dasharray="18.5 44" transform="rotate(-90 9 9)"/></svg></button>
+      <span class="mono tnum ink2 hx" style="font-size:12px;padding:0 4px">$0.42</span>
+      <button class="ibtn hx" aria-label="更多" data-i="more"></button>
+      <button class="ibtn hx" aria-label="右侧面板" data-i="panelRight" id="toggleRight"></button>
+    </header>
+
+    <!-- scene: chat -->
+    <div class="scroll" id="scroll" data-scene-view="chat ask">
+      <div class="col">
+        <div class="user"><div class="bubble">先看一下 omp 的 RPC 协议，然后把 Bridge 的帧解析写出来，支持 v2 分片。</div><div class="uact"><button class="ibtn sm" aria-label="复制" data-i="copy"></button><button class="ibtn sm" aria-label="编辑并从这里重来" data-i="pen15"></button><button class="ibtn sm" aria-label="分叉" data-i="branch"></button></div></div>
+
+        <div class="turn">
+          <div class="think" data-collapsible>
+            <button class="think-h" aria-expanded="false"><span data-i="sparkle"></span><span class="lbl">思考了 6 秒</span><span class="chev ink3" data-i="chevDown14"></span></button>
+            <div class="collapse"><div><div class="trace">ready 帧之后才能 negotiate_protocol。v2 下大帧会被拆成 rpc_chunk，需要按 chunkId 重组并校验 byteLength。先读 wire/frames.ts 和 rpc-frame.ts。</div></div></div>
+          </div>
+
+          <div class="toolrun" data-collapsible data-open>
+            <button class="run-h" aria-expanded="true"><span class="chev" data-i="chevDown12"></span><span class="tnum">5 个工具调用 · 2 个文件</span></button>
+            <div class="collapse open"><div style="padding:0 6px 4px;margin:0 -6px">
+              <div class="rows">
+                <div class="tool" data-collapsible>
+                  <button class="trow"><span class="ic"><span class="base" data-i="search13"></span><span class="cv" data-i="chevDown12"></span></span><span class="lab">查看了 3 个文件</span><span class="tchip mono">wire/frames.ts, rpc-frame.ts, rpc-types.ts</span><span class="meta">0.4s</span></button>
+                  <div class="collapse"><div><div class="detail ink2 mono" style="font-size:11.5px;line-height:1.8">src/modes/rpc/wire/frames.ts<br>src/modes/rpc/rpc-frame.ts<br>src/modes/rpc/rpc-types.ts:320-340</div></div></div>
+                </div>
+                <div class="tool" data-collapsible>
+                  <button class="trow"><span class="ic"><span class="base" data-i="filePlus"></span><span class="cv" data-i="chevDown12"></span></span><span class="lab">新建</span><span class="tchip mono">packages/bridge/src/process.ts</span><span class="meta"><span class="add">+186</span></span></button>
+                  <div class="collapse"><div><div class="detail"><div class="term"><span class="cmd">packages/bridge/src/process.ts</span>
+export class OmpProcess {
+  #chunks = new Map&lt;string, string[]&gt;();
+  …</div></div></div></div>
+                </div>
+                <div class="tool open" data-collapsible data-open>
+                  <button class="trow" aria-expanded="true"><span class="ic"><span class="base" data-i="terminal"></span><span class="cv" data-i="chevDown12"></span></span><span class="lab">运行</span><span class="tchip mono">bun test packages/bridge</span><span class="meta">2.1s</span></button>
+                  <div class="collapse open"><div><div class="detail"><div class="term"><span class="pill green">exit 0</span><span class="cmd">$ bun test packages/bridge</span>
+bun test v1.3.2
+ ✓ frames › reassembles out-of-order chunks [1.2ms]
+ ✓ frames › rejects byteLength mismatch [0.3ms]
+ ✓ frames › enforces maxReassembledFrameBytes [0.4ms]
+ ✓ process › correlates responses by id [3.1ms]
+
+ 4 pass · 0 fail · 12 expect() calls</div></div></div></div>
+                </div>
+              </div>
+              <div class="diffchips">
+                <button class="dchip" style="animation:pop-in .25s var(--ease) both">process.ts <span class="add">+186</span></button>
+                <button class="dchip" style="animation:pop-in .25s var(--ease) 80ms both">process.test.ts <span class="add">+94</span></button>
+              </div>
+            </div></div>
+          </div>
+
+          <div class="prose">
+            <p>Bridge 的帧层已写好，在 <code>packages/bridge/src/process.ts</code>：</p>
+            <ul><li>按行切分 stdout，首帧必须是 <code>ready</code>，支持 v2 时自动协商；</li><li><code>rpc_chunk</code> 按 <code>chunkId</code> 重组，校验 <code>byteLength</code> 和 64MB 上限；</li><li>命令按 <code>id</code> 关联，<code>login</code> 与 <code>predict_word</code> 使用各自的超时。</li></ul>
+            <p>4 个测试全部通过。下一步是进程池，见 <a href="#">DESIGN.md §3.1</a>。</p>
+          </div>
+          <div class="actions">
+            <button class="ibtn sm" aria-label="复制" data-i="copy"></button>
+            <button class="ibtn sm" aria-label="重试" data-i="retry"></button>
+            <button class="ibtn sm" aria-label="分叉" data-i="branch"></button>
+            <span class="m mono">opus-5.5 · 18.2k tok · 41s</span>
+          </div>
+        </div>
+
+        <div class="user"><div class="bubble">好，继续做进程池，跑一下全部测试。</div><div class="uact"><button class="ibtn sm" aria-label="复制" data-i="copy"></button><button class="ibtn sm" aria-label="编辑并从这里重来" data-i="pen15"></button><button class="ibtn sm" aria-label="分叉" data-i="branch"></button></div></div>
+
+        <div class="turn" id="liveTurn">
+          <div class="think open" data-collapsible data-open>
+            <button class="think-h" aria-expanded="true"><span data-i="sparkle" style="color:var(--ink-2)"></span><span class="lbl">思考了 3 秒</span><span class="chev ink3" data-i="chevDown14" style="transform:rotate(180deg)"></span></button>
+            <div class="collapse open"><div><div class="trace">池上限 6，超限时回收 isSettled 且没有待答 UI 请求的进程。需要改 pool.ts，然后跑 bun test。</div></div></div>
+          </div>
+          <div class="toolrun" data-collapsible data-open>
+            <button class="run-h" aria-expanded="true"><span class="chev" data-i="chevDown12"></span><span class="tnum">2 个工具调用</span></button>
+            <div class="collapse open"><div style="padding:0 6px 4px;margin:0 -6px">
+              <div class="rows">
+                <div class="tool" data-collapsible>
+                  <button class="trow"><span class="ic"><span class="base" data-i="pen"></span><span class="cv" data-i="chevDown12"></span></span><span class="lab">编辑</span><span class="tchip mono">packages/bridge/src/pool.ts</span><span class="meta"><span class="add">+74</span> <span class="del">−12</span></span></button>
+                  <div class="collapse"><div></div></div>
+                </div>
+                <div class="tool">
+                  <div class="trow" style="cursor:default" id="pendingRow"><span class="ic" id="pendingIc"><span data-i="shield" style="color:var(--orange);animation:pulse-dot 1.6s infinite"></span></span><span class="lab" id="pendingLab">运行</span><span class="tchip mono">bun test &amp;&amp; bun run typecheck</span><span class="meta" id="pendingMeta">等待批准</span></div>
+                </div>
+              </div>
+              <div class="appr card fade-up" role="alertdialog" aria-labelledby="apprq">
+                <div class="bar"></div>
+                <div class="body">
+                  <div class="q" id="apprq"><span data-i="shield14" style="color:var(--orange)"></span>允许运行 <span class="chip mono" style="color:var(--ink)">bash</span>？</div>
+                  <div class="why">审批模式为"每次询问"</div>
+                  <div class="pre">$ bun test &amp;&amp; bun run typecheck
+cwd: ~/Desktop/code/tools/omp-ui</div>
+                </div>
+                <div class="foot">
+                  <span class="cb" role="checkbox" aria-checked="false" tabindex="0" id="always"><span class="box" data-i="check12"></span>本会话总是允许 bash</span>
+                  <span style="flex:1"></span>
+                  <button class="btn secondary">拒绝 <span class="kbd">Esc</span></button>
+                  <button class="btn primary" id="approve">允许 <span class="kbd">Enter</span></button>
+                </div>
+              </div>
+            </div></div>
+          </div>
+
+          <div class="ask card fade-up hidden" id="askCard" style="margin-top:2px">
+            <div style="padding:12px">
+              <div style="font-size:10.5px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px">进程池</div>
+              <div style="display:flex;justify-content:space-between;gap:12px"><span style="font-weight:500">超出上限时怎么处理新会话？</span><button class="ibtn sm" aria-label="关闭" data-i="x14"></button></div>
+              <div style="display:flex;flex-direction:column;gap:2px;margin-top:8px">
+                <button class="opt on"><span class="radio"><i></i></span><span>回收最久未用的空闲进程</span><span class="rec">推荐</span></button>
+                <button class="opt"><span class="radio"><i></i></span><span>拒绝并提示用户手动关闭</span></button>
+                <button class="opt"><span class="radio"><i></i></span><span>不限制数量</span></button>
+                <label class="opt" style="cursor:text"><span style="width:16px"></span><input placeholder="输入其他答案…" style="border:0;outline:0;background:transparent;flex:1;font-size:13px" aria-label="其他答案" /></label>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;border-top:1px solid var(--line)">
+              <span style="display:flex;align-items:center;gap:8px"><button class="ibtn sm" aria-label="上一题" data-i="chevL" style="opacity:.35"></button>
+                <span class="pdots"><i style="width:9px;height:9px;border:2.5px solid var(--ink)"></i><i style="width:7px;height:7px;border:1.5px solid var(--ink-3)"></i></span>
+                <button class="ibtn sm" aria-label="下一题" data-i="chevR"></button></span>
+              <button class="send" aria-label="下一题" data-i="arrowR"></button>
+            </div>
+          </div>
+
+          <div class="runind waiting" id="runind"><span class="pixels" data-pixels></span><span class="lbl" id="runlbl">等待你的回应</span><span class="tm tnum" id="timer">0.0s</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- scene: welcome -->
+    <div class="scroll hidden" data-scene-view="welcome">
+      <div class="welcome">
+        <svg width="48" height="48" viewBox="0 0 48 48" class="ink3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 33c2-9 5-17 14-19 8-2 14 4 13 11-1 6-7 9-12 8"/><path d="M25 33c-1 3-1 6 1 8"/><path d="M19 22c1-1 2-1 3 0M28 21c1-1 2-1 3 0"/><path d="M14 38c4 2 9 3 14 2"/></svg>
+        <h1>今天做点什么？</h1>
+        <div class="cstrip" style="margin-top:24px"><button class="pbtn"><span data-i="folder15"></span>omp-ui<span class="ink3" data-i="chevDown11"></span></button></div>
+        <div class="composer">
+          <textarea class="ctext" rows="2" placeholder="给 omp 发消息，@ 引用文件，/ 运行命令" aria-label="消息"></textarea>
+          <div class="crow">
+            <div class="l"><button class="ibtn" aria-label="添加附件" data-i="plus18"></button><button class="pchip"><span data-i="pshield"></span>仅写操作</button></div>
+            <div class="r"><button class="mbtn"><b>opus-5.5</b><span class="t">高</span><span class="ink3" data-i="chevDown11"></span></button><button class="send off" aria-label="发送" data-i="arrowUp"></button></div>
+          </div>
+        </div>
+        <div style="margin-top:20px">
+          <button class="fu" style="animation:fade-up .35s var(--ease) both"><span class="ink3" data-i="cornerDown"></span>解释这个仓库的结构</button>
+          <button class="fu" style="animation:fade-up .35s var(--ease) 90ms both"><span class="ink3" data-i="cornerDown"></span>找出并修复失败的测试</button>
+          <button class="fu" style="animation:fade-up .35s var(--ease) 180ms both"><span class="ink3" data-i="cornerDown"></span>审查未提交的改动</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- scene: gallery -->
+    <div class="scroll hidden" data-scene-view="gallery">
+      <div class="gal">
+        <div>
+          <h4>代码块</h4>
+          <div class="card">
+            <div class="cbar"><span><span class="mono" style="font-size:12px;font-weight:500">process.ts</span> <span class="ink2" style="font-size:11.5px">TypeScript</span></span><button class="btn" style="height:24px;padding:0 6px;font-size:11.5px;color:var(--ink-2)" id="copyBtn"><span data-i="copy10"></span><span>复制</span></button></div>
+<div class="code"><span class="ln">1</span><span class="k">export class</span> <span class="f">OmpProcess</span> <span class="p">{</span>
+<span class="ln">2</span>  <span class="v">#chunks</span> <span class="p">=</span> <span class="k">new</span> <span class="f">Map</span><span class="p">&lt;</span><span class="f">string</span><span class="p">,</span> <span class="f">string</span><span class="p">[]&gt;();</span>
+<span class="ln">3</span>  <span class="c">// v2: 按 chunkId 重组，校验 byteLength</span>
+<span class="ln">4</span>  <span class="f">onChunk</span><span class="p">(</span><span class="v">f</span><span class="p">:</span> <span class="f">RpcChunkFrame</span><span class="p">) {</span>
+<span class="ln">5</span>    <span class="k">if</span> <span class="p">(</span><span class="v">f</span><span class="p">.</span><span class="v">byteLength</span> <span class="p">&gt;</span> <span class="n">64</span> <span class="p">*</span> <span class="n">1024</span> <span class="p">*</span> <span class="n">1024</span><span class="p">)</span> <span class="k">throw new</span> <span class="f">Error</span><span class="p">(</span><span class="s">"frame too large"</span><span class="p">);</span>
+<span class="ln">6</span>  <span class="p">}</span>
+<span class="ln">7</span><span class="p">}</span></div>
+          </div>
+        </div>
+        <div>
+          <h4>差异视图</h4>
+          <div class="card">
+            <div class="cbar"><span class="mono" style="font-size:12px;font-weight:500"><span class="ink2">packages/bridge/src/</span>pool.ts <span class="add">+3</span> <span class="del">−1</span></span><span class="chip" style="height:24px">合并 · 并排</span></div>
+            <div class="diff">
+              <div class="l h">@@ -18,6 +18,8 @@ export class ProcessPool</div>
+              <div class="l"><span>18</span><span>18</span><span></span><span>  evict() {</span></div>
+              <div class="l d"><span>19</span><span></span><span>−</span><span>    const victim = this.lru.oldest();</span></div>
+              <div class="l a"><span></span><span>19</span><span>+</span><span>    const victim = this.lru.find(p =&gt;</span></div>
+              <div class="l a"><span></span><span>20</span><span>+</span><span>      p.isSettled &amp;&amp; p.pendingUi.size === 0);</span></div>
+              <div class="l a"><span></span><span>21</span><span>+</span><span>    if (!victim) return false;</span></div>
+              <div class="l"><span>20</span><span>22</span><span></span><span>    victim.stop();</span></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <h4>Slash 菜单</h4>
+          <div class="menu" id="slashMenu" style="animation:pop-in .18s var(--ease) both;transform-origin:bottom center">
+            <span class="hl"></span>
+            <button class="mrow"><span class="ink2" data-i="minimize"></span><span class="nm">/compact</span><span class="ds">压缩当前上下文</span><span class="src">内置</span></button>
+            <button class="mrow"><span class="ink2" data-i="branch"></span><span class="nm">/fork</span><span class="ds">从当前位置分叉为新会话</span><span class="src">内置</span></button>
+            <button class="mrow"><span class="ink2" data-i="shield14"></span><span class="nm">/security</span><span class="ds">计划、运行、比较安全扫描</span><span class="src">扩展</span></button>
+            <button class="mrow"><span class="ink2" data-i="sparkle"></span><span class="nm">/commit</span><span class="ds">生成提交信息并更新 changelog</span><span class="src">技能</span></button>
+            <div class="mfoot">↑↓ 选择 · Enter 确认 · Esc 关闭</div>
+          </div>
+        </div>
+        <div>
+          <h4>子代理（胶囊）</h4>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="capsule open" data-collapsible data-open>
+              <button class="caprow"><span class="ring active"><svg width="22" height="22"><circle cx="11" cy="11" r="10" fill="none" stroke="var(--line)" stroke-width="2"/><circle cx="11" cy="11" r="10" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-linecap="round" stroke-dasharray="17.6 45.2"/></svg>1</span><span class="n">explore</span><span class="d">梳理 session 树与 branch 关系</span><span class="mono ink2" style="font-size:11.5px">12 轮 · 34k</span><span class="chev ink3" data-i="chevDown14" style="transform:rotate(180deg)"></span></button>
+              <div class="collapse open"><div><div class="capdet"><span class="vl"></span><div><div class="kv"><span>读取 session-tree.ts</span><span class="mono">2.1k</span></div><div class="kv"><span>搜索 leafId</span><span class="mono">14 处</span></div><div class="kv"><a href="#" style="color:var(--accent-ink);text-decoration:none">查看完整记录 →</a></div></div></div></div></div>
+            </div>
+            <div class="capsule"><div class="caprow"><span class="badge" style="background:var(--green)" data-i="checkW"></span><span class="n">reviewer</span><span class="d">审查 process.ts</span><span class="pill green">完成</span></div></div>
+            <div class="capsule"><div class="caprow"><span class="badge" style="background:var(--red)" data-i="xW"></span><span class="n">task</span><span class="d">迁移旧配置文件</span><span class="pill red">失败</span></div></div>
+          </div>
+        </div>
+        <div>
+          <h4>横幅与通知</h4>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="banner orange"><span data-i="retry" style="color:var(--orange)"></span><span style="flex:1"><b style="color:var(--orange);font-weight:500">重试 2/5</b> · 429 rate limited，<span class="mono tnum">4s</span> 后重试</span><button class="btn" style="height:24px;color:var(--ink-2)">取消重试</button></div>
+            <div class="banner red" id="errBanner"><span data-i="x14" style="color:var(--red)"></span><span style="flex:1"><b style="color:var(--red);font-weight:500">请求失败</b> <span class="mono ink2" style="font-size:11.5px">anthropic · opus-5.5 · HTTP 529</span></span><button class="btn secondary" style="height:24px">重试</button></div>
+            <div style="display:flex;align-items:center;gap:12px;color:var(--ink-2);font-size:11.5px"><span style="flex:1;height:1px;background:var(--line)"></span>上下文已压缩 · 182k → 24k<span style="flex:1;height:1px;background:var(--line)"></span></div>
+            <div class="toast"><span class="dot" style="background:var(--green)"></span>已回退到 sonnet-5（opus 过载）</div>
+          </div>
+        </div>
+        <div>
+          <h4>删除确认</h4>
+          <div class="dialog-demo"><div class="scrim"></div><div class="dlg">
+            <div style="font-size:14px;font-weight:600">删除这个会话？</div>
+            <div class="ink2" style="font-size:12.5px;margin-top:6px">会移到回收目录，30 天后清除。</div>
+            <div class="term" style="margin-top:10px;font-size:11px">~/.omp/agent/sessions/-Desktop-code/2026-10-16_01a1….jsonl</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px"><button class="btn secondary">取消</button><button class="btn danger">删除</button></div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dock" data-scene-view="chat ask">
+      <div class="col">
+        <div class="queue"><span class="qchip"><span class="k">稍后</span>顺便更新 DESIGN.md 的进程池一节<button class="ibtn sm" style="width:18px;height:18px" aria-label="移除" data-i="x10"></button></span></div>
+        <div class="composer running" id="composer">
+          <textarea class="ctext" rows="2" placeholder="给 omp 发消息，@ 引用文件，/ 运行命令" aria-label="消息"></textarea>
+          <div class="crow">
+            <div class="l"><button class="ibtn" aria-label="添加附件" data-i="plus18"></button><button class="pchip yolo"><span data-i="palert"></span>完全访问</button></div>
+            <div class="r"><button class="mbtn"><b>opus-5.5</b><span class="t">高</span><span class="ink3" data-i="chevDown11"></span></button><button class="send" aria-label="停止" id="send"><span class="sq"></span></button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <div class="vsep r"></div>
+
+  <!-- ───────────── right panel ───────────── -->
+  <aside class="right" aria-label="面板">
+    <div class="tabs" role="tablist">
+      <button class="tab on" role="tab" aria-selected="true">待办</button>
+      <button class="tab" role="tab">子代理<span class="nd"></span></button>
+      <button class="tab" role="tab">变更</button>
+      <button class="tab" role="tab">目标</button>
+      <button class="tab" role="tab">信息</button>
+    </div>
+    <div class="rbody">
+      <div class="phase">M1 骨架</div>
+      <div class="card">
+        <div class="task done"><span class="badge" style="background:var(--green)" data-i="checkW"></span><span class="tx">帧解析与 v2 分片重组</span></div>
+        <div class="task"><span class="ring active"><svg width="22" height="22"><circle cx="11" cy="11" r="10" fill="none" stroke="var(--line)" stroke-width="2"/><circle cx="11" cy="11" r="10" fill="none" stroke="var(--ink-3)" stroke-width="2" stroke-linecap="round" stroke-dasharray="17.6 45.2"/></svg>2</span><span class="tx">进程池与 LRU 回收</span></div>
+        <div class="task"><span class="ring"><svg width="22" height="22"><circle cx="11" cy="11" r="10" fill="none" stroke="var(--line)" stroke-width="2"/></svg>3</span><span class="tx">WS 鉴权与 Origin 校验</span></div>
+        <div class="task"><span class="badge" style="background:var(--orange);font-size:12px;font-weight:700">!</span><span class="tx">夹具录制<div style="font-size:12px;color:var(--orange-ink)">等待真实 provider 凭据</div></span></div>
+      </div>
+      <div class="phase">M2 核心对话</div>
+      <div class="card">
+        <div class="task"><span class="ring"><svg width="22" height="22"><circle cx="11" cy="11" r="10" fill="none" stroke="var(--line)" stroke-width="2"/></svg>1</span><span class="tx">流式 reducer</span></div>
+        <div class="task aband"><span class="badge" style="background:var(--ink-3)">–</span><span class="tx">逐词入场动画</span></div>
+      </div>
+      <div class="phase">上下文</div>
+      <div class="card" style="padding:10px 12px">
+        <div class="kv"><span>tokens</span><span class="mono" style="color:var(--ink)">84.2k / 200k</span></div>
+        <div style="height:4px;border-radius:999px;background:var(--field);margin:6px 0 8px"><div style="width:42%;height:100%;border-radius:999px;background:var(--accent);transition:width .4s var(--ease)"></div></div>
+        <div class="kv"><span>花费</span><span class="mono" style="color:var(--ink)">$0.42</span></div>
+        <div class="kv"><span>模型</span><span class="mono" style="color:var(--ink)">cpa/claude-opus-5.5</span></div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+// ── icons (lucide-compatible paths) ──
+const P = {
+  plus:'<path d="M12 5v14M5 12h14"/>', search:'<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  chevDown:'<path d="M6 9l6 6 6-6"/>', chevL:'<path d="M15 18l-6-6 6-6"/>', chevR:'<path d="M9 6l6 6-6 6"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  filePlus:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15h6"/>',
+  pen:'<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>', terminal:'<path d="M4 17l6-5-6-5M12 19h8"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/>',
+  check:'<path d="M20 6L9 17l-5-5"/>', x:'<path d="M18 6L6 18M6 6l12 12"/>',
+  copy:'<rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  retry:'<path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>', branch:'<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-6 3-11 6"/>',
+  more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  panelLeft:'<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/>', panelRight:'<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/>',
+  settings:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  activity:'<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>', brain:'<path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04zM14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z"/>',
+  arrowUp:'<path d="M12 19V5M5 12l7-7 7 7"/>', arrowR:'<path d="M5 12h14M12 5l7 7-7 7"/>', cornerDown:'<path d="M9 10l-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>',
+  minimize:'<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>',
+  shieldP:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/>',
+  folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>',
+};
+const SPEC = { // name: [path, size, stroke, extraClassOrFill]
+  plus9:['plus',9,3], plus16:['plus',16,2], search12:['search',12,2], search13:['search',13,2], chevDown12:['chevDown',12,2.2], chevDown14:['chevDown',14,2.2], chevDown11:['chevDown',11,2.4],
+  chevL:['chevL',14,2.2], chevR:['chevR',14,2.2], filePlus:['filePlus',13,2], pen:['pen',13,2], terminal:['terminal',13,2], shield:['shield',13,2], shield14:['shield',14,2],
+  check12:['check',12,3], checkW:['check',12,3.5], x14:['x',14,2.2], x10:['x',10,2.5], xW:['x',11,3.5], copy:['copy',15,1.8], copy10:['copy',10,2], retry:['retry',15,1.8], branch:['branch',15,1.8],
+  more:['more',15,2.4], panelLeft:['panelLeft',15,1.8], panelRight:['panelRight',15,1.8], settings:['settings',15,1.8], activity:['activity',15,1.8], brain:['brain',14,1.8],
+  arrowUp:['arrowUp',16,2.4], arrowR:['arrowR',14,2.5], cornerDown:['cornerDown',11,2], minimize:['minimize',15,1.8], pen15:['pen',15,1.8], chevDown10:['chevDown',10,2.4], plus10:['plus',10,2.5], more13:['more',13,2.4],
+  plus18:['plus',18,1.8], pshield:['shieldP',15,1.8], palert:['shield',15,1.8], folder15:['folder',15,1.8],
+};
+// §6.1 sidebar hover affordances: group collapse + new-in-project; row time → ⋯
+document.querySelectorAll('.nav .glabel').forEach(g => g.insertAdjacentHTML('beforeend', '<span class="ga"><button aria-label="折叠分组" data-i="chevDown10"></button><button aria-label="在此项目新建会话" data-i="plus10"></button></span>'));
+document.querySelectorAll('.nav .srow').forEach(r => r.insertAdjacentHTML('beforeend', '<span class="more" aria-hidden="true" data-i="more13"></span>'));
+// SpinnerRing is 24px (§6.13): scale the 22-unit drawings
+document.querySelectorAll('.ring svg').forEach(s => { s.setAttribute('viewBox', '0 0 22 22'); s.setAttribute('width', 24); s.setAttribute('height', 24); });
+document.querySelectorAll('[data-i]').forEach(el => {
+  const n = el.dataset.i;
+  if (n === 'sparkle') { el.innerHTML = '<svg class="i" width="16" height="16" viewBox="0 0 24 24" style="fill:currentColor;stroke:none;color:inherit"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>'; if(!el.style.color) el.style.color='var(--ink-3)'; el.style.display='inline-flex'; return; }
+  const [p, s, w] = SPEC[n];
+  el.insertAdjacentHTML('afterbegin', `<svg class="i" width="${s}" height="${s}" viewBox="0 0 24 24" stroke-width="${w}">${P[p]}</svg>`);
+  if (!el.matches('button,.badge,.plus,.box,.send,.more')) el.style.display = 'inline-flex';
+});
+
+// ── pixel grid (Drive wavefront) ──
+document.querySelectorAll('[data-pixels]').forEach(g => {
+  for (let i = 0; i < 9; i++) {
+    const r = Math.floor(i / 3), c = i % 3, d = (c + Math.abs(r - 1)) * 90;
+    const s = document.createElement('span'); s.style.animation = `pixel-on 650ms ease-in-out ${d}ms infinite`; g.append(s);
+  }
+});
+
+// ── collapsibles ──
+document.querySelectorAll('[data-collapsible]').forEach(box => {
+  const btn = box.querySelector(':scope > button'), col = box.querySelector(':scope > .collapse');
+  if (!btn || !col) return;
+  btn.addEventListener('click', () => {
+    const open = !col.classList.contains('open');
+    col.classList.toggle('open', open); box.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open);
+    const chev = btn.querySelector('.chev');
+    if (chev) chev.style.transform = btn.classList.contains('run-h') ? (open ? '' : 'rotate(-90deg)') : (open ? 'rotate(180deg)' : '');
+  });
+});
+
+// ── sliding hover highlight ──
+function slider(container, items, active) {
+  const hl = container.querySelector('.hl');
+  const go = el => { if (!el) { hl.style.opacity = 0; return; } hl.style.opacity = 1; hl.style.top = el.offsetTop + 'px'; hl.style.height = el.offsetHeight + 'px'; };
+  items.forEach(el => { el.addEventListener('mouseenter', () => go(el)); el.addEventListener('focus', () => go(el)); });
+  container.addEventListener('mouseleave', () => go(active && active()));
+  requestAnimationFrame(() => go(active ? active() : items[0]));
+}
+const nav = document.getElementById('nav');
+slider(nav, [...nav.querySelectorAll('.srow')], () => nav.querySelector('.srow.cur'));
+const sm = document.getElementById('slashMenu');
+slider(sm, [...sm.querySelectorAll('.mrow')], () => sm.querySelector('.mrow'));
+
+// ── timer ──
+let ds = 0; const timer = document.getElementById('timer');
+setInterval(() => { ds++; const t = ds / 10; timer.textContent = t < 60 ? t.toFixed(1) + 's' : `${Math.floor(t / 60)}m ${(t % 60).toFixed(1).padStart(4, '0')}s`; }, 100);
+
+// ── header hairline on scroll ──
+const sc = document.getElementById('scroll'), hdr = document.getElementById('hdr');
+sc.addEventListener('scroll', () => hdr.classList.toggle('scrolled', sc.scrollTop > 4));
+
+// ── approval checkbox / approve ──
+const always = document.getElementById('always');
+always.addEventListener('click', () => { const on = !always.classList.contains('on'); always.classList.toggle('on', on); always.setAttribute('aria-checked', on); });
+document.getElementById('approve').addEventListener('click', e => {
+  const card = e.target.closest('.appr');
+  // §6.7: collapse the card into a one-line receipt via grid-rows (400ms)
+  const wrap = document.createElement('div');
+  wrap.className = 'collapse open'; wrap.style.transitionDuration = '400ms';
+  card.replaceWith(wrap); const inner = document.createElement('div'); inner.append(card); wrap.append(inner);
+  requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.remove('open')));
+  setTimeout(() => wrap.outerHTML = '<div class="fade-up" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);padding:2px 0 4px 22px"><span style="color:var(--green);display:inline-flex"><svg class="i" width="12" height="12" viewBox="0 0 24 24" stroke-width="3" style="stroke-dasharray:24;animation:check-draw .3s var(--ease) 80ms both"><path d="M20 6L9 17l-5-5"/></svg></span>已允许</div>', 400);
+  // tool row → running (§6.5): spinner + shimmer label
+  document.getElementById('pendingIc').innerHTML = '<span class="spinner"></span>';
+  document.getElementById('pendingLab').classList.add('shimmer');
+  document.getElementById('pendingMeta').textContent = '';
+  // run indicator → running (§6.11)
+  const ri = document.getElementById('runind'), rl = document.getElementById('runlbl');
+  ri.classList.remove('waiting'); rl.textContent = '运行 bash'; rl.classList.add('shimmer');
+});
+
+// ── ask options ──
+const askOpts = [...document.querySelectorAll('.ask button.opt')];
+const askDots = document.querySelectorAll('.ask .pdots i');
+askOpts.forEach(o => o.addEventListener('click', () => {
+  askOpts.forEach(x => x.classList.remove('on')); o.classList.add('on');
+  // §6.8: single-choice auto-advances after 480ms
+  setTimeout(() => {
+    askDots[0].style.cssText = 'width:7px;height:7px;background:var(--ink-3)';
+    askDots[1].style.cssText = 'width:9px;height:9px;border:2.5px solid var(--ink)';
+  }, 480);
+}));
+document.querySelector('.ask input').addEventListener('input', e => { if (e.target.value) askOpts.forEach(x => x.classList.remove('on')); });
+
+// ── copy button swap ──
+document.getElementById('copyBtn').addEventListener('click', e => {
+  const b = e.currentTarget; b.style.color = 'var(--green)'; b.lastElementChild.textContent = '已复制';
+  setTimeout(() => { b.style.color = 'var(--ink-2)'; b.lastElementChild.textContent = '复制'; }, 1500);
+});
+document.getElementById('errBanner').addEventListener('click', e => { const b = e.currentTarget; b.style.animation = 'none'; b.offsetWidth; b.style.animation = 'shake .36s'; });
+
+// ── scenes & theme ──
+const app = document.getElementById('app');
+function scene(name) {
+  document.querySelectorAll('[data-scene]').forEach(b => b.classList.toggle('on', b.dataset.scene === name));
+  document.querySelectorAll('[data-scene-view]').forEach(v => v.classList.toggle('hidden', !v.dataset.sceneView.split(' ').includes(name)));
+  app.classList.toggle('no-right', name === 'gallery' || name === 'welcome');
+  // §6.3: the welcome header shows only the title (no cwd chip, ring, cost, ⋯ or panel toggle)
+  document.getElementById('hdrTitle').textContent = name === 'welcome' ? '新对话' : '设计前端并实现 Bridge';
+  document.querySelectorAll('#hdr .hx').forEach(e => e.classList.toggle('hidden', name === 'welcome'));
+  const ask = name === 'ask';
+  document.getElementById('askCard').classList.toggle('hidden', !ask);
+  document.querySelector('#liveTurn .toolrun').classList.toggle('hidden', ask);
+  const lbl = document.getElementById('runlbl');
+  lbl.textContent = '等待你的回应'; lbl.classList.remove('shimmer'); document.getElementById('runind').classList.add('waiting');
+  document.getElementById('composer').classList.toggle('running', name === 'chat' || ask);
+  if (name === 'chat' || ask) requestAnimationFrame(() => sc.scrollTop = sc.scrollHeight);
+}
+document.querySelectorAll('[data-scene]').forEach(b => b.addEventListener('click', () => scene(b.dataset.scene)));
+document.getElementById('theme').addEventListener('click', () => document.documentElement.classList.toggle('dark'));
+document.getElementById('toggleRight').addEventListener('click', () => app.classList.toggle('no-right'));
+const q = new URLSearchParams(location.search);
+if (q.get('theme') === 'dark') document.documentElement.classList.add('dark');
+scene(q.get('scene') || 'chat');
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>omp-ui</title>
+<script>
+// No-flash theme: apply before first paint. localStorage key: omp-ui-theme
+(function () {
+  try {
+    var t = localStorage.getItem("omp-ui-theme");
+    var dark = t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    if (dark) document.documentElement.classList.add("dark");
+  } catch (e) { /* localStorage unavailable: follow system via theme.ts */ }
+})();
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

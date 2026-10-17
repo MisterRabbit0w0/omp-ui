@@ -1,0 +1,14 @@
+{
+  "name": "@omp-ui/bridge",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@omp-ui/protocol": "workspace:*"
+  },
+  "scripts": {
+    "dev": "bun src/main.ts",
+    "start": "bun src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test"
+  }
+}

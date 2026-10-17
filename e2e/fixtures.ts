@@ -121,7 +121,9 @@ async function startBridge(): Promise<{ bridge: Bridge; stop: () => Promise<void
 	const base = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ui-e2e-"));
 	const homeDir = path.join(base, "home");
 	const agentDir = path.join(base, "agent");
-	const cwd = path.join(base, "work");
+	// Nested so the cwd is longer than the header chip budget on every OS (m9 expects a middle ellipsis);
+	// on Linux `/tmp/omp-ui-e2e-xxx/work` alone would fit.
+	const cwd = path.join(base, "projects", "fixture-workspace-with-a-long-name", "work");
 	for (const d of [homeDir, agentDir, cwd]) fs.mkdirSync(d, { recursive: true });
 	const argvLog = path.join(base, "argv.log");
 	const fixtureIds = writeFixtureSessions(agentDir, cwd);

@@ -177,7 +177,12 @@ export function Sidebar({
 	const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 	const fetchedPreviewIdsRef = useRef<Record<string, true>>({});
 
-	const hl = useSlidingHighlight<HTMLElement>({ variant: "list", activeKey: `${currentSessionId}:${sessions.length}:${query}` });
+	const hl = useSlidingHighlight<HTMLElement>({
+		variant: "list",
+		activeKey: `${currentSessionId}:${sessions.length}:${query}`,
+		// FRONTEND.md §6: the highlight rests on the current session row, also after Alt+↑/↓.
+		restOnActive: true,
+	});
 
 	useEffect(() => {
 		if (currentSessionId) {

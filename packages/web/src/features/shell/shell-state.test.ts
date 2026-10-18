@@ -70,9 +70,15 @@ describe("shell-state", () => {
 			"s2",
 			false,
 		);
-		// s1 has unread settled (and is not currentSessionId), s2 has pendingUi, s3 has prompt-error
-		expect(count).toBe(3);
-		expect(formatDocumentTitle("设计前端", count)).toBe("(3) 设计前端 — omp");
+		// s1 has unread settled, s3 has prompt-error; s2 (pendingUi) is the open session and the user is looking at it
+		expect(count).toBe(2);
+		expect(formatDocumentTitle("设计前端", count)).toBe("(2) 设计前端 — omp");
 		expect(formatDocumentTitle(undefined, 0)).toBe("omp");
+
+		// Same state while the user is away: the open session's pending request counts again.
+		expect(countAttentionSessions({ s1, s2, s3 }, { s1: 200 }, { s1: 100 }, "s2", true)).toBe(3);
+
+		// A turn that settled while the open session was being viewed is not unread once seen.
+		expect(countAttentionSessions({ s1 }, { s1: 200 }, { s1: 300 }, "s1", true)).toBe(0);
 	});
 });

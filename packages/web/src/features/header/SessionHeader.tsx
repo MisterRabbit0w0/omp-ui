@@ -13,6 +13,7 @@ import {
 	RotateCcw,
 	SlidersHorizontal,
 } from "lucide-react";
+import { BranchMenuButton } from "../composer/BranchMenu";
 import { stripPrivateUse } from "../sidebar/sidebar-utils";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { SessionListItem } from "@omp-ui/protocol";
@@ -337,6 +338,8 @@ export function SessionHeader({
 						</button>
 					</Tooltip>
 				)}
+
+				{cwd && <BranchMenuButton cwd={cwd} running={sessionRunning || Boolean(sessionItem?.running)} />}
 
 				<span className="sp flex-1" />
 

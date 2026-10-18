@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, send, sidebar, test } from "./fixtures";
+import { expect, send, showAllSessions, sidebar, test } from "./fixtures";
 
 const scroller = (page: Page) => page.locator(".scroll.flex-1.overflow-auto").first();
 const distFromBottom = (page: Page) =>
@@ -39,6 +39,7 @@ test("switching sessions mid-run and back keeps the history visible and pinned",
 	await send(app, "LONG switch");
 	await expect(prose(app, "paragraph 5:")).toBeVisible();
 
+	await showAllSessions(app);
 	await sidebar(app).getByText("Fixture plain session").click();
 	await expect(prose(app, "fixture assistant reply")).toBeVisible();
 	await sidebar(app).getByText("first prompt").click();

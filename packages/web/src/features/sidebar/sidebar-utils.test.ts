@@ -99,7 +99,7 @@ describe("sidebar-utils", () => {
 		const preview = previewGroupSessions(many, { currentSessionId: "m7" });
 		expect(preview.sessions.map(s => s.id)).toContain("m7");
 		expect(preview.sessions).toHaveLength(SESSION_GROUP_PREVIEW_LIMIT + 1);
-		expect(preview.hiddenCount).toBe(2);
+		expect(preview.hiddenCount).toBe(8 - SESSION_GROUP_PREVIEW_LIMIT - 1);
 	});
 
 	test("getSessionRowStatus prioritizes waiting > running > error > unread > idle", () => {

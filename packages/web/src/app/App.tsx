@@ -36,8 +36,9 @@ function WorkspaceApp() {
 	const [diagSessionId, setDiagSessionId] = useState<string | null>(null);
 	const [diagOpen, setDiagOpen] = useState(false);
 	const [lastSeen, setLastSeen] = useState<Record<string, number>>({});
+	// "Away" = tab hidden or window unfocused: only then do notifications / title badges apply to the open session.
 	const [pageHidden, setPageHidden] = useState<boolean>(() =>
-		typeof document !== "undefined" ? document.hidden : false,
+		typeof document !== "undefined" ? document.hidden || !document.hasFocus() : false,
 	);
 
 	const prevAttentionRef = useRef<Record<string, number>>({});
@@ -59,25 +60,26 @@ function WorkspaceApp() {
 		}
 	}, [storeToasts, dismissStoreToast]);
 
-	// Track page visibility for desktop notifications and (n) document title prefix (DESIGN §12)
+	// Track whether the user is actually looking at the page (visibility + window focus) (DESIGN §12)
 	useEffect(() => {
-		const onVisChange = () => {
-			const hidden = document.hidden;
-			setPageHidden(hidden);
-			if (!hidden && currentSessionId) {
-				setLastSeen(prev => ({ ...prev, [currentSessionId]: Date.now() }));
-			}
+		const sync = () => setPageHidden(document.hidden || !document.hasFocus());
+		document.addEventListener("visibilitychange", sync);
+		window.addEventListener("focus", sync);
+		window.addEventListener("blur", sync);
+		return () => {
+			document.removeEventListener("visibilitychange", sync);
+			window.removeEventListener("focus", sync);
+			window.removeEventListener("blur", sync);
 		};
-		document.addEventListener("visibilitychange", onVisChange);
-		return () => document.removeEventListener("visibilitychange", onVisChange);
-	}, [currentSessionId]);
+	}, []);
 
-	// Mark active session seen when viewed while page is visible
+	// Mark the open session seen while it is being viewed, including when a turn settles under the user's eyes;
+	// otherwise the later hide/blur would count that already-seen result as unread.
 	useEffect(() => {
 		if (!pageHidden && currentSessionId) {
 			setLastSeen(prev => ({ ...prev, [currentSessionId]: Date.now() }));
 		}
-	}, [currentSessionId, pageHidden]);
+	}, [currentSessionId, pageHidden, attention]);
 
 	// Desktop notifications when page is hidden and session settles or awaits UI (DESIGN §12)
 	useEffect(() => {

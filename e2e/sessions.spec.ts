@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { approveBtn, approvalCard, expect, send, sidebar, test, text } from "./fixtures";
+import { approveBtn, approvalCard, expect, send, showAllSessions, sidebar, test, text } from "./fixtures";
 
 const popover = (page: Page) => page.getByRole("dialog").last();
 
@@ -29,6 +29,7 @@ test("opening a fixture session warms the process; model switches before the fir
 });
 
 test("plain fixture session preview", async ({ app }) => {
+	await showAllSessions(app);
 	await sidebar(app).getByText("Fixture plain session").click();
 	await expect(text(app, "fixture assistant reply")).toBeVisible();
 	await expect(text(app, "hello fixture")).toBeVisible();

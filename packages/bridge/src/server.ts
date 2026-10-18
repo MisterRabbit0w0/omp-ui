@@ -19,11 +19,11 @@ import type {
 import { DEFAULT_PORT, WS_PATH } from "@omp-ui/protocol";
 import { ConfigStore } from "./config";
 import { FileAccessError, readSessionFile, searchFiles } from "./files";
-import { readGitChanges } from "./git";
+import { listGitBranches, readGitChanges, switchGitBranch } from "./git";
 import { ModelCatalog } from "./models";
 import { ProcessPool } from "./pool";
 import { OmpProcess, resolveOmpCommand } from "./process";
-import { SessionScanner } from "./sessions";
+import { defaultAgentDir, SessionScanner } from "./sessions";
 
 const HELLO_TIMEOUT_MS = 5_000;
 const PORT_ATTEMPTS = 20;
@@ -106,7 +106,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const ompCommand = options.ompCommand ?? resolveOmpCommand();
 	const config = new ConfigStore(options.configDir);
 	await config.purgeTrash();
-	const modelCatalog = new ModelCatalog(ompCommand);
+	const modelCatalog = new ModelCatalog(ompCommand, options.agentDir ?? defaultAgentDir());
 	const pool = new ProcessPool<OmpProcess>(options.poolMax);
 	const scanner = new SessionScanner({
 		...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
@@ -372,9 +372,12 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				return json(config.config);
 			}
 			if (req.method === "DELETE" && segments.length === 3) {
-				if (pool.has(id)) return errorJson(409, "session is live; stop it before deleting");
+				// Only a running session is protected (DESIGN §3.6); an idle open one is stopped first so its file is released.
+				const live = pool.get(id);
+				if (live !== undefined && live.settled === false) return errorJson(409, "session is running; stop it before deleting");
 				const file = await scanner.findFile(id);
 				if (!file) return errorJson(404, `unknown session: ${id}`);
+				if (live !== undefined) await pool.remove(id);
 				const target = await config.moveToTrash(file);
 				return json({ trashed: target });
 			}
@@ -401,6 +404,24 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			} catch (error) {
 				return errorJson(502, (error as Error).message);
 			}
+		}
+		if (req.method === "GET" && url.pathname === "/api/git/branches") {
+			const cwd = url.searchParams.get("cwd") ?? "";
+			if (cwd.length === 0) return errorJson(400, "cwd is required");
+			return json(await listGitBranches(cwd));
+		}
+		if (req.method === "POST" && url.pathname === "/api/git/switch") {
+			const body = (await req.json().catch(() => null)) as { cwd?: unknown; branch?: unknown } | null;
+			const cwd = typeof body?.cwd === "string" ? body.cwd : "";
+			const branch = typeof body?.branch === "string" ? body.branch : "";
+			if (cwd.length === 0 || branch.length === 0) return errorJson(400, "cwd and branch are required");
+			// Writes to the working tree: only known workspaces, and never under a running agent (it would edit files mid-switch).
+			const known = (await scanner.scan()).filter(item => item.cwd === cwd);
+			if (known.length === 0) return errorJson(403, "cwd is not a known workspace");
+			if (known.some(item => item.running)) return errorJson(409, "a session in this workspace is running; wait for it to finish");
+			const result = await switchGitBranch(cwd, branch);
+			if (!result.ok) return errorJson(result.status, result.error);
+			return json(await listGitBranches(cwd));
 		}
 		if (req.method === "GET" && url.pathname === "/api/file") {
 			const cwd = url.searchParams.get("cwd") ?? "";

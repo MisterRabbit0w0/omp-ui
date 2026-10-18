@@ -221,10 +221,12 @@ export interface SessionView {
 	statsStale: boolean;
 	/** Approval mode this session's process was started with (omp has no RPC to read it back); undefined = unknown, use the config default. */
 	approvalMode?: ApprovalMode;
+	/** Mode picked while a run was active; applied (process restart) right before the next prompt is sent. */
+	pendingApprovalMode?: ApprovalMode;
 	effects: SessionEffect[];
 }
 
-export function createSessionView(sessionId: string, init?: Partial<Pick<SessionView, "proc" | "readonly" | "title" | "approvalMode">>): SessionView {
+export function createSessionView(sessionId: string, init?: Partial<Pick<SessionView, "proc" | "readonly" | "title" | "approvalMode" | "pendingApprovalMode">>): SessionView {
 	return {
 		sessionId,
 		proc: init?.proc ?? "none",
@@ -233,6 +235,7 @@ export function createSessionView(sessionId: string, init?: Partial<Pick<Session
 		state: null,
 		title: init?.title,
 		approvalMode: init?.approvalMode,
+		pendingApprovalMode: init?.pendingApprovalMode,
 		messages: [],
 		drafts: new Map(),
 		toolExec: new Map(),
@@ -321,7 +324,7 @@ export function reduceProc(view: SessionView, proc: ProcState, info?: { code?: n
 
 /** Discard everything server-owned; the store follows with a cold start (§3.4 resync). */
 export function resetForResync(view: SessionView): SessionView {
-	return createSessionView(view.sessionId, { proc: view.proc === "none" ? "none" : view.proc, title: view.title, approvalMode: view.approvalMode });
+	return createSessionView(view.sessionId, { proc: view.proc === "none" ? "none" : view.proc, title: view.title, approvalMode: view.approvalMode, pendingApprovalMode: view.pendingApprovalMode });
 }
 
 export function reduce(view: SessionView, frame: RpcServerFrame, ctx: { live: boolean }): SessionView {

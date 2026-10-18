@@ -481,8 +481,24 @@ describe("http api", () => {
 
 		const ws = await connectAuthed();
 		const liveId = await startSession(ws, "r10");
-		const liveDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
-		expect(liveDel.status).toBe(409);
+
+		// Idle open session without a file on disk: unknown to the scanner, and the process is left alone.
+		const idleDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
+		expect(idleDel.status).toBe(404);
+		expect(bridge.pool.has(liveId)).toBe(true);
+
+		// Running session (parked on the approval prompt): refused with 409.
+		ws.send({ t: "attach", sessionId: liveId, sinceSeq: 0 });
+		ws.send({ t: "rpc", reqId: "r10-run", sessionId: liveId, cmd: { type: "prompt", message: "hold" } });
+		const request = await ws.waitMessage(
+			msg => msg.t === "frame" && msg.frame.type === "extension_ui_request" && msg.frame.method === "select",
+		);
+		const runningDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
+		expect(runningDel.status).toBe(409);
+		if (request.t === "frame" && request.frame.type === "extension_ui_request") {
+			ws.send({ t: "ui_response", sessionId: liveId, frame: { type: "extension_ui_response", id: request.frame.id, value: "Approve" } });
+		}
+		await ws.waitMessage(msg => msg.t === "frame" && msg.frame.type === "session_settled");
 		ws.close();
 
 		const del = await api("/api/sessions/sess-1", { method: "DELETE" });

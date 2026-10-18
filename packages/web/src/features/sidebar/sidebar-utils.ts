@@ -117,7 +117,7 @@ export function groupSessionsByCwd(sessions: readonly SessionListItem[]): Sessio
  * Default number of sessions shown per workspace group before the explicit
  * "显示更多" expansion (the sidebar stays scannable with many sessions).
  */
-export const SESSION_GROUP_PREVIEW_LIMIT = 5;
+export const SESSION_GROUP_PREVIEW_LIMIT = 3;
 
 export interface GroupSessionsPreview {
 	sessions: SessionListItem[];

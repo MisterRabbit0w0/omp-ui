@@ -559,6 +559,14 @@ export function groupSlashCommands(rows: readonly SlashMenuRow[]): SlashCommandG
 	return groups;
 }
 
+/**
+ * Rows in the order SlashMenu renders them (grouped by source). The highlight index, arrow keys and Enter/Tab
+ * all index into this list, so it must match the menu; `filterSlashCommands` alone sorts by name across sources.
+ */
+export function orderSlashRows(rows: readonly SlashMenuRow[]): SlashMenuRow[] {
+	return groupSlashCommands(rows).flatMap(group => group.items);
+}
+
 // ── 4. Queue chips & image restoration ──────────────────────────────
 
 export interface QueueChipItem {

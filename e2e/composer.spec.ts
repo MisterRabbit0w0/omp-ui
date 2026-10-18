@@ -58,7 +58,7 @@ test("welcome page: no project line, no right panel, header shows only the title
 	await expect(rightPanel(app)).toHaveCount(0);
 	await expect(app.locator(".hdr .title")).toHaveText("新对话");
 	await expect(app.locator(".hdr .chip.mono")).toHaveCount(0);
-	await expect(app.getByRole("button", { name: "更多" })).toHaveCount(0);
+	await expect(app.locator(".hdr").getByRole("button", { name: "更多" })).toHaveCount(0);
 	await expect(app.getByRole("button", { name: "右侧面板" })).toHaveCount(0);
 
 	const strip = app.getByTestId("composer-context-strip");
@@ -136,45 +136,49 @@ test("the last used project, model and permission are remembered on the next wel
 	await expect(permissionChip(app)).toHaveAccessibleName("权限：每次询问");
 });
 
-test("live session: switching permission restarts with --resume, keeps the transcript, and is locked while a run is active", async ({ app, bridge }) => {
+test("live session: a permission pick during a run waits for the next request; an idle pick restarts with --resume", async ({ app, bridge }) => {
 	await send(app, "hello");
 	await expect(approvalCard(app)).toBeVisible();
 
-	// run in progress: the menu opens but every row is disabled with the hint
+	// run in progress: the menu stays usable and says the pick applies to the next request
 	await permissionChip(app).click();
-	await expect(popover(app).getByText("运行结束后可切换")).toBeVisible();
-	for (const row of await popover(app).getByRole("menuitemradio").all()) await expect(row).toBeDisabled();
-	await app.keyboard.press("Escape");
+	await expect(popover(app).getByText("当前请求仍在运行，切换将在下次请求时生效")).toBeVisible();
+	for (const row of await popover(app).getByRole("menuitemradio").all()) await expect(row).toBeEnabled();
+	await popover(app).getByRole("menuitemradio", { name: /完全访问/ }).click();
+	await expect(permissionChip(app)).toHaveAccessibleName("权限：完全访问");
+	expect(launches(bridge)).toHaveLength(1);
 
 	await approveBtn(app).click();
 	await expect(text(app, "Command finished: hi")).toBeVisible();
 	await expect(approvalCard(app)).toHaveCount(0);
+	// run over, but nothing restarted yet: the chip still shows the picked mode, the process still runs "write"
 	expect(launches(bridge)).toHaveLength(1);
 	expect(flagValue(launches(bridge)[0]!, "--approval-mode")).toBe("write");
+	await expect(permissionChip(app)).toHaveAccessibleName("权限：完全访问");
 
-	await permissionChip(app).click();
-	await expect(popover(app).getByText("切换会重启会话进程，历史不受影响")).toBeVisible();
-	await popover(app).getByRole("menuitemradio", { name: /完全访问/ }).click();
-
+	// the next request applies it: restart with --resume and the new mode, then the prompt runs on the new process
+	await send(app, "second turn");
 	await expect.poll(() => launches(bridge).length).toBe(2);
 	const second = launches(bridge)[1]!;
 	expect(flagValue(second, "--approval-mode")).toBe("yolo");
 	expect(flagValue(second, "--resume")).toMatch(/\.jsonl$/);
-
-	// back to ready: chip reflects the new mode, input is usable, no process-exit banner, history intact
-	await expect(permissionChip(app)).toHaveAccessibleName("权限：完全访问");
-	await expect(composerBox(app)).toBeEnabled();
-	await expect(app.getByText(/会话进程已退出/)).toHaveCount(0);
-	await expect(text(app, "fake reply to: hello")).toBeVisible();
-	await expect(text(app, "Command finished: hi")).toBeVisible();
-
-	// and the resumed process keeps working on the same transcript
-	await send(app, "second turn");
 	await expect(approvalCard(app)).toBeVisible();
 	await approveBtn(app).click();
 	await expect(text(app, "fake reply to: second turn")).toBeVisible();
+	await expect(permissionChip(app)).toHaveAccessibleName("权限：完全访问");
+	await expect(app.getByText(/会话进程已退出/)).toHaveCount(0);
 	await expect(text(app, "fake reply to: hello")).toBeVisible();
+	await expect(text(app, "Command finished: hi")).toBeVisible();
 	await expect(sidebar(app).getByText("hello", { exact: true })).toHaveCount(1);
+
+	// idle pick: restarts right away
+	await permissionChip(app).click();
+	await expect(popover(app).getByText("切换会重启会话进程，历史不受影响")).toBeVisible();
+	await popover(app).getByRole("menuitemradio", { name: /每次询问/ }).click();
+	await expect.poll(() => launches(bridge).length).toBe(3);
+	expect(flagValue(launches(bridge)[2]!, "--approval-mode")).toBe("always-ask");
+	await expect(permissionChip(app)).toHaveAccessibleName("权限：每次询问");
+	await expect(composerBox(app)).toBeEnabled();
 });
 
 test("新对话 (sidebar, Ctrl+N, palette, group +) opens no dialog: welcome page, composer focused", async ({ app, bridge }) => {

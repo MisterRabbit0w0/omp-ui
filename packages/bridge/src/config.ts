@@ -20,6 +20,8 @@ export class ConfigStore {
 	readonly configPath: string;
 	readonly trashDir: string;
 	#config: UiConfig;
+	/** mtime+size of config.json when `#config` was read/written; a different value means another writer touched it. */
+	#signature = "";
 
 	constructor(dir: string = defaultConfigDir()) {
 		this.dir = dir;
@@ -29,23 +31,25 @@ export class ConfigStore {
 	}
 
 	get config(): UiConfig {
-		return this.#config;
+		return this.#fresh();
 	}
 
 	update(patch: Partial<UiConfig>): UiConfig {
-		this.#config = { ...this.#config, ...patch };
+		this.#config = { ...this.#fresh(), ...patch };
 		this.#save();
 		return this.#config;
 	}
 
 	archive(sessionId: string): void {
-		if (this.#config.archived.includes(sessionId)) return;
-		this.update({ archived: [...this.#config.archived, sessionId] });
+		const archived = this.#fresh().archived;
+		if (archived.includes(sessionId)) return;
+		this.update({ archived: [...archived, sessionId] });
 	}
 
 	unarchive(sessionId: string): void {
-		if (!this.#config.archived.includes(sessionId)) return;
-		this.update({ archived: this.#config.archived.filter(id => id !== sessionId) });
+		const archived = this.#fresh().archived;
+		if (!archived.includes(sessionId)) return;
+		this.update({ archived: archived.filter(id => id !== sessionId) });
 	}
 
 	/** Move a session file into the trash. Throws when the source is missing. */
@@ -86,9 +90,31 @@ export class ConfigStore {
 		return purged;
 	}
 
-	#load(): UiConfig {
+	/** Current config, re-read only when another omp-ui bridge (or a hand edit) changed the file since we last looked. */
+	#fresh(): UiConfig {
+		let signature = "";
 		try {
-			const raw = fs.readFileSync(this.configPath, "utf8");
+			const stat = fs.statSync(this.configPath);
+			signature = `${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			// missing file: fall through with an empty signature
+		}
+		if (signature !== this.#signature) {
+			this.#config = this.#load();
+			this.#signature = signature;
+		}
+		return this.#config;
+	}
+
+	/** Parse the file. A missing file means defaults; an unreadable/corrupt one keeps the last good config. */
+	#load(): UiConfig {
+		let raw: string;
+		try {
+			raw = fs.readFileSync(this.configPath, "utf8");
+		} catch {
+			return { archived: [], recentProjects: [] };
+		}
+		try {
 			const parsed: unknown = JSON.parse(raw);
 			if (typeof parsed !== "object" || parsed === null) throw new Error("config is not an object");
 			const record = parsed as Partial<UiConfig>;
@@ -100,14 +126,17 @@ export class ConfigStore {
 					: [],
 			};
 		} catch {
-			return { archived: [], recentProjects: [] };
+			return this.#config ?? { archived: [], recentProjects: [] };
 		}
 	}
 
 	#save(): void {
 		fs.mkdirSync(this.dir, { recursive: true });
-		const tmp = `${this.configPath}.tmp`;
+		// Unique temp name: two bridges saving at once must not interleave writes into one shared `.tmp`.
+		const tmp = `${this.configPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 		fs.writeFileSync(tmp, `${JSON.stringify(this.#config, null, 2)}\n`, "utf8");
 		fs.renameSync(tmp, this.configPath);
+		const stat = fs.statSync(this.configPath);
+		this.#signature = `${stat.mtimeMs}:${stat.size}`;
 	}
 }

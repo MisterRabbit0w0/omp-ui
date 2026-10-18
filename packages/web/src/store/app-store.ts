@@ -91,11 +91,14 @@ export interface AppState {
 	dispatch(msg: B2C): void;
 	loadSessions(): Promise<void>;
 	loadProjects(): Promise<void>;
-	loadModelCatalog(): Promise<void>;
+	/** `refresh` refetches even when cached (the bridge revalidates against omp's own config files). */
+	loadModelCatalog(refresh?: boolean): Promise<void>;
 	openSession(item: SessionListItem): Promise<void>;
 	newSession(cwd: string, opts?: NewSessionOptions): Promise<string>;
 	/** Leave the current session for the welcome page (currentSessionId = null), optionally preselecting a project. */
 	startWelcome(cwd?: string): void;
+	/** A session was archived/deleted: if it is the open one, go to the welcome page. `drop` also forgets its view and attach (deleted). */
+	leaveSession(sessionId: string, opts?: { cwd?: string; drop?: boolean }): void;
 	/** Patch and persist the pending new-session config. */
 	updatePendingSession(patch: Partial<PendingSessionConfig>): void;
 	/** Create a session from the pending config (project + model + thinking + approval mode). Null when no project is chosen. */
@@ -414,9 +417,9 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				}
 			},
 
-			async loadModelCatalog(): Promise<void> {
+			async loadModelCatalog(refresh = false): Promise<void> {
 				catalogWanted = true;
-				if (!http || get().modelCatalog || get().modelCatalogLoading) return;
+				if (!http || (get().modelCatalog && !refresh) || get().modelCatalogLoading) return;
 				set({ modelCatalogLoading: true });
 				try {
 					set({ modelCatalog: await http.listModels() });
@@ -519,6 +522,18 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				set({ currentSessionId: null, welcomeRequest: { ...(cwd !== undefined ? { cwd } : {}), at: Date.now() } });
 			},
 
+			leaveSession(sessionId: string, opts: { cwd?: string; drop?: boolean } = {}): void {
+				const wasCurrent = get().currentSessionId === sessionId;
+				if (opts.drop) {
+					client?.detach(sessionId);
+					set(s => {
+						const { [sessionId]: _removed, ...views } = s.views;
+						return { views, sessions: s.sessions.filter(it => it.id !== sessionId) };
+					});
+				}
+				if (wasCurrent) get().startWelcome(opts.cwd);
+			},
+
 			updatePendingSession(patch: Partial<PendingSessionConfig>): void {
 				const next = { ...get().pendingSession, ...patch };
 				set({ pendingSession: next });
@@ -561,11 +576,21 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				if (!view || restarting.has(sessionId)) return sessionId;
 				// No live process (preview / exited): remember the mode, the lazy start applies it.
 				if (view.readonly || view.proc === "none" || view.proc === "exited" || view.proc === "crashed") {
-					updateView(sessionId, v => ({ ...v, approvalMode: mode }));
+					updateView(sessionId, v => ({ ...v, approvalMode: mode, pendingApprovalMode: undefined }));
 					return sessionId;
 				}
-				// Only a settled, ready process may be replaced; the UI disables the chip otherwise.
-				if (view.proc !== "ready" || view.run.kind !== "idle") return sessionId;
+				// Run in progress: restarting now would kill it. Remember the pick; sendPrompt applies it before the next request.
+				if (view.proc === "ready" && view.run.kind !== "idle") {
+					const effective = view.approvalMode ?? get().config?.defaultApprovalMode ?? "write";
+					updateView(sessionId, v => ({ ...v, pendingApprovalMode: mode === effective ? undefined : mode }));
+					return sessionId;
+				}
+				if (view.proc !== "ready") return sessionId;
+				// Idle and re-picking the mode the process already runs with: just drop any deferred pick.
+				if (mode === (view.approvalMode ?? get().config?.defaultApprovalMode ?? "write")) {
+					updateView(sessionId, v => ({ ...v, pendingApprovalMode: undefined }));
+					return sessionId;
+				}
 				const c = requireClient();
 				const item = get().sessions.find(s => s.id === sessionId);
 				const cwd = item?.cwd;
@@ -581,7 +606,7 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				const thinking = level && level !== "inherit" ? level : undefined;
 
 				restarting.add(sessionId);
-				updateView(sessionId, v => ({ ...v, proc: "starting", approvalMode: mode }));
+				updateView(sessionId, v => ({ ...v, proc: "starting", approvalMode: mode, pendingApprovalMode: undefined }));
 				let currentId = sessionId;
 				try {
 					c.send({ t: "stop", sessionId });
@@ -645,6 +670,19 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				if (inflightStart) await inflightStart;
 				else if (view.readonly || view.proc === "none" || view.proc === "exited" || view.proc === "crashed") {
 					await get().startSession(sessionId);
+				}
+				// A permission change picked during the previous run takes effect now, before this request. Idle only:
+				// steering/follow-up into a live run must never restart the process.
+				const afterStart = get().views[sessionId];
+				if (
+					afterStart?.pendingApprovalMode !== undefined &&
+					afterStart.proc === "ready" &&
+					afterStart.run.kind === "idle" &&
+					afterStart.pendingApprovalMode !== afterStart.approvalMode
+				) {
+					sessionId = await get().restartWithApprovalMode(sessionId, afterStart.pendingApprovalMode);
+				} else if (afterStart?.pendingApprovalMode !== undefined && afterStart.pendingApprovalMode === afterStart.approvalMode) {
+					updateView(sessionId, v => ({ ...v, pendingApprovalMode: undefined }));
 				}
 				const c = requireClient();
 				const run = get().views[sessionId]?.run.kind ?? "idle";

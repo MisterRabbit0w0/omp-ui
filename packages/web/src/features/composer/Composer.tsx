@@ -20,6 +20,7 @@ import { Kbd } from "@/ui/Chip";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/ui/Menu";
 import { Tooltip } from "@/ui/Tooltip";
 import { ModelThinkingButton, thinkingSegments } from "./ModelSelector";
+import { BranchMenuButton } from "./BranchMenu";
 import { PermissionChip } from "./PermissionChip";
 import { ProjectMenuButton } from "./ProjectMenu";
 import { resolveSessionConfig } from "./new-session-config";
@@ -33,6 +34,7 @@ import {
 	detectMenuTrigger,
 	downscaleImageFile,
 	filterSlashCommands,
+	orderSlashRows,
 	getSendButtonState,
 	isComposerDisabled,
 	isRunBusy,
@@ -205,13 +207,14 @@ export function Composer({
 	const currentThinking: ThinkingLevel = welcome ? (resolved.thinking ?? "inherit") : (view?.state?.thinkingLevel ?? "high");
 	const approvalMode: ApprovalMode = welcome
 		? resolved.approvalMode
-		: (view?.approvalMode ?? config?.defaultApprovalMode ?? "write");
+		: (view?.pendingApprovalMode ?? view?.approvalMode ?? config?.defaultApprovalMode ?? "write");
 
 	const acceptsImages = canModelAcceptImages(currentModel);
 
 	// The catalog spawns `omp models --json` (seconds), so only fetch it when the welcome composer needs it.
+	// Refresh on every mount: the bridge answers from cache unless omp's config/models files changed (e.g. edited in the omp terminal).
 	useEffect(() => {
-		if (sessionId === null) void loadModelCatalog();
+		if (sessionId === null) void loadModelCatalog(true);
 	}, [sessionId, loadModelCatalog]);
 
 	// 新对话 / Ctrl+N / group "+" land here: preselect the project, then focus the input.
@@ -279,8 +282,9 @@ export function Composer({
 					? rawTrigger
 					: null;
 
+	// Same order the menu renders (grouped by source): the highlight index, arrow keys and Enter/Tab must all agree.
 	const slashRows =
-		activeTrigger?.kind === "slash" ? filterSlashCommands(view?.commands ?? [], activeTrigger) : [];
+		activeTrigger?.kind === "slash" ? orderSlashRows(filterSlashCommands(view?.commands ?? [], activeTrigger)) : [];
 
 	// Reset menu highlight index when query changes
 	useEffect(() => {
@@ -933,7 +937,8 @@ export function Composer({
 			mode={approvalMode}
 			context={welcome ? "welcome" : "session"}
 			restarting={restartingProc}
-			locked={busy || bashRunning}
+			locked={bashRunning}
+			deferred={busy}
 			disabled={composerDisabled && !restartingProc}
 			open={permissionOpen}
 			onOpenChange={setPermissionOpen}
@@ -1171,6 +1176,11 @@ export function Composer({
 						disabled={composerDisabled}
 						open={projectOpen}
 						onOpenChange={setProjectOpen}
+					/>
+					<BranchMenuButton
+						cwd={resolved.cwd}
+						running={sessions.some(s => s.cwd === resolved.cwd && s.running)}
+						disabled={composerDisabled}
 					/>
 				</div>
 			)}

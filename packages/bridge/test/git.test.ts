@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { readGitChanges } from "../src/git";
+import { listGitBranches, readGitChanges, switchGitBranch } from "../src/git";
 import { tempDir } from "./helpers";
 
 function git(cwd: string, ...args: string[]): void {
@@ -80,5 +80,51 @@ describe("readGitChanges", () => {
 		const result = await readGitChanges(cwd, "unstaged");
 		expect(result.files.some(f => f.path === "link.txt")).toBe(false);
 		expect(JSON.stringify(result)).not.toContain("top secret");
+	});
+});
+
+describe("listGitBranches / switchGitBranch", () => {
+	function repoWithBranches(): string {
+		const cwd = initRepo();
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
+		git(cwd, "add", "a.txt");
+		git(cwd, "commit", "-m", "initial");
+		git(cwd, "branch", "feature");
+		return cwd;
+	}
+
+	test("reports repo: false outside a work tree", async () => {
+		expect(await listGitBranches(tempDir("branches-none"))).toMatchObject({ repo: false, current: null, branches: [] });
+	});
+
+	test("lists local branches and the checked-out one", async () => {
+		const cwd = repoWithBranches();
+		const result = await listGitBranches(cwd);
+		expect(result.repo).toBe(true);
+		expect(result.current).not.toBeNull();
+		expect(result.branches).toContain("feature");
+		expect(result.branches).toContain(result.current!);
+	});
+
+	test("switches to an existing branch and refuses unknown or option-like names", async () => {
+		const cwd = repoWithBranches();
+		expect(await switchGitBranch(cwd, "feature")).toEqual({ ok: true });
+		expect((await listGitBranches(cwd)).current).toBe("feature");
+		expect(await switchGitBranch(cwd, "does-not-exist")).toMatchObject({ ok: false, status: 404 });
+		expect(await switchGitBranch(cwd, "--detach")).toMatchObject({ ok: false, status: 404 });
+		expect((await listGitBranches(cwd)).current).toBe("feature");
+	});
+
+	test("git's refusal on conflicting local changes comes back as 409 and the branch is unchanged", async () => {
+		const cwd = repoWithBranches();
+		const start = (await listGitBranches(cwd)).current!;
+		git(cwd, "switch", "feature");
+		fs.writeFileSync(path.join(cwd, "a.txt"), "feature change\n");
+		git(cwd, "commit", "-am", "feature change");
+		git(cwd, "switch", start);
+		fs.writeFileSync(path.join(cwd, "a.txt"), "dirty\n");
+		const result = await switchGitBranch(cwd, "feature");
+		expect(result).toMatchObject({ ok: false, status: 409 });
+		expect((await listGitBranches(cwd)).current).toBe(start);
 	});
 });

@@ -262,6 +262,11 @@ export function flagValue(launch: OmpLaunch, flag: string): string | undefined {
 export const composerBox = (page: Page) => page.getByRole("textbox", { name: "消息" });
 
 export const sidebar = (page: Page) => page.getByRole("complementary", { name: "会话" });
+/** The sidebar shows 3 sessions per workspace by default; expand it when a test needs an older row. */
+export const showAllSessions = async (page: Page) => {
+	const toggle = sidebar(page).getByRole("button", { name: /^展开显示更多/ });
+	if ((await toggle.count()) > 0) await toggle.click();
+};
 export const approvalCard = (page: Page) => page.getByRole("alertdialog");
 export const approveBtn = (page: Page) => approvalCard(page).getByRole("button", { name: /^允许/ });
 export const denyBtn = (page: Page) => approvalCard(page).getByRole("button", { name: /^拒绝/ });

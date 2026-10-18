@@ -22,3 +22,15 @@ export interface GitChangesResult {
 	/** Output was capped (very large diff / file count). */
 	truncated?: boolean;
 }
+
+/** Local branches of the workspace repo, for the composer's branch picker. */
+export interface GitBranchesResult {
+	repo: boolean;
+	root?: string;
+	/** Checked-out branch; null when HEAD is detached. */
+	current: string | null;
+	/** Short commit id when HEAD is detached. */
+	detachedAt?: string;
+	/** Local branch names, most recently committed first. */
+	branches: string[];
+}

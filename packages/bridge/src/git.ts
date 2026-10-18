@@ -7,7 +7,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { GitChangedFile, GitChangeScope, GitChangesResult } from "@omp-ui/protocol";
+import type { GitBranchesResult, GitChangedFile, GitChangeScope, GitChangesResult } from "@omp-ui/protocol";
 
 const GIT_TIMEOUT_MS = 8_000;
 const MAX_DIFF_BYTES = 2_000_000;
@@ -260,4 +260,61 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 
 	files.sort((a, b) => a.path.localeCompare(b.path));
 	return { repo: true, root, scope, files, ...(truncated ? { truncated: true } : {}) };
+}
+
+/** Local branches plus the checked-out one. `repo:false` when `cwd` is not inside a work tree. */
+export async function listGitBranches(cwd: string): Promise<GitBranchesResult> {
+	const rootRun = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+	const root = rootRun?.code === 0 ? rootRun.stdout.trim() : "";
+	if (!root) return { repo: false, current: null, branches: [] };
+
+	const [currentRun, listRun] = await Promise.all([
+		runGit(cwd, ["branch", "--show-current"]),
+		runGit(cwd, ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"]),
+	]);
+	const current = currentRun?.code === 0 && currentRun.stdout.trim() ? currentRun.stdout.trim() : null;
+	const branches = listRun?.code === 0 ? listRun.stdout.split("\n").map(line => line.trim()).filter(line => line.length > 0) : [];
+	let detachedAt: string | undefined;
+	if (current === null) {
+		const head = await runGit(cwd, ["rev-parse", "--short", "HEAD"]);
+		if (head?.code === 0 && head.stdout.trim()) detachedAt = head.stdout.trim();
+	}
+	return { repo: true, root, current, ...(detachedAt !== undefined ? { detachedAt } : {}), branches };
+}
+
+export type SwitchBranchResult = { ok: true } | { ok: false; status: 400 | 404 | 409 | 502; error: string };
+
+/**
+ * `git switch <branch>` for an existing local branch. The name must match a listed branch exactly (never
+ * created, never passed through as an option), and git's own refusal (dirty tree conflicts) is surfaced as-is.
+ */
+export async function switchGitBranch(cwd: string, branch: string): Promise<SwitchBranchResult> {
+	const before = await listGitBranches(cwd);
+	if (!before.repo) return { ok: false, status: 404, error: "not a git repository" };
+	if (!before.branches.includes(branch)) return { ok: false, status: 404, error: `unknown local branch: ${branch}` };
+	if (before.current === branch) return { ok: true };
+
+	let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
+	try {
+		proc = Bun.spawn(["git", "-C", cwd, "switch", "--no-guess", branch], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, GIT_PAGER: "cat" },
+		});
+	} catch (error) {
+		return { ok: false, status: 502, error: (error as Error).message };
+	}
+	const outcome = await Promise.race([
+		Promise.all([new Response(proc.stderr).text(), proc.exited]).then(([stderr, code]) => ({ stderr, code })),
+		Bun.sleep(GIT_TIMEOUT_MS).then(() => null),
+	]);
+	if (outcome === null) {
+		proc.kill();
+		return { ok: false, status: 502, error: "git switch timed out" };
+	}
+	if (outcome.code !== 0) {
+		// Dirty-tree conflicts are the expected refusal; report them as a conflict, not a server fault.
+		return { ok: false, status: 409, error: outcome.stderr.trim() || `git switch exited with code ${outcome.code}` };
+	}
+	return { ok: true };
 }

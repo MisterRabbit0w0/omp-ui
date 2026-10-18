@@ -97,7 +97,10 @@ function recordingClient(sessionIds: string[]): { client: BridgeClient; calls: s
 			return { sessionId, sessionFile: `/tmp/${sessionId}.jsonl` };
 		},
 		resolveReqId: () => undefined,
-		rpc: async () => ({}),
+		rpc: async (_id: string, cmd: { type: string }) => {
+			calls.push(`rpc:${cmd.type}`);
+			return {};
+		},
 	};
 	return { client: client as unknown as BridgeClient, calls, starts };
 }
@@ -235,22 +238,53 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().sessions.map(s => s.id)).toEqual(["s3-new"]);
 	});
 
-	test("refuses while a run is in progress; a preview only remembers the mode", async () => {
+	test("while a run is in progress the pick is deferred; a preview only remembers the mode", async () => {
 		const { client, calls } = recordingClient(["s4"]);
 		const store = createAppStore({ client, http: {} as BridgeHttp });
 		store.setState({
 			sessions: [sessionItem("s4"), sessionItem("s5")],
 			views: {
-				s4: readyView("s4", { run: { kind: "running" } }),
+				s4: readyView("s4", { run: { kind: "running" }, approvalMode: "write" }),
 				s5: { ...createSessionView("s5", { readonly: true }) },
 			},
 		});
 		await store.getState().restartWithApprovalMode("s4", "yolo");
 		expect(calls).toEqual([]);
-		expect(store.getState().views.s4!.approvalMode).toBeUndefined();
+		expect(store.getState().views.s4!.approvalMode).toBe("write");
+		expect(store.getState().views.s4!.pendingApprovalMode).toBe("yolo");
+		// picking the mode the process already runs with cancels the deferred switch
+		await store.getState().restartWithApprovalMode("s4", "write");
+		expect(store.getState().views.s4!.pendingApprovalMode).toBeUndefined();
 		await store.getState().restartWithApprovalMode("s5", "yolo");
 		expect(calls).toEqual([]);
 		expect(store.getState().views.s5!.approvalMode).toBe("yolo");
+	});
+
+	test("a deferred pick is applied right before the next prompt once idle", async () => {
+		const { client, calls, starts } = recordingClient(["s7"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s7")],
+			currentSessionId: "s7",
+			views: { s7: readyView("s7", { approvalMode: "write", pendingApprovalMode: "yolo" }) },
+		});
+		await store.getState().sendPrompt("s7", "hello");
+		expect(starts).toEqual([expect.objectContaining({ cwd: "/work", approvalMode: "yolo" })]);
+		expect(calls.indexOf("start:s7")).toBeLessThan(calls.findIndex(c => c.startsWith("rpc:prompt")));
+		expect(store.getState().views.s7!.approvalMode).toBe("yolo");
+		expect(store.getState().views.s7!.pendingApprovalMode).toBeUndefined();
+	});
+
+	test("a deferred pick never restarts the process for a steer into a live run", async () => {
+		const { client, starts } = recordingClient(["s8"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s8")],
+			views: { s8: readyView("s8", { run: { kind: "running" }, approvalMode: "write", pendingApprovalMode: "yolo" }) },
+		});
+		await store.getState().sendPrompt("s8", "steer me");
+		expect(starts).toEqual([]);
+		expect(store.getState().views.s8!.pendingApprovalMode).toBe("yolo");
 	});
 
 	test("a failed start toasts and leaves the session exited instead of stuck on 'starting'", async () => {

@@ -223,6 +223,19 @@ export function Sidebar({
 
 	const groups = useMemo(() => groupSessionsByCwd(filtered), [filtered]);
 
+	// What the list actually shows (short list per workspace unless expanded or searching): Alt+↑/↓ must not land on hidden rows.
+	const visibleGroups = useMemo(
+		() =>
+			groups.map(group => ({
+				...group,
+				sessions: previewGroupSessions(group.sessions, {
+					expanded: query.trim().length > 0 || Boolean(expandedGroups[group.cwd]),
+					currentSessionId,
+				}).sessions,
+			})),
+		[groups, query, expandedGroups, currentSessionId],
+	);
+
 	const handleSelectSession = useCallback(
 		(item: SessionListItem) => {
 			setLastSeen(prev => ({ ...prev, [item.id]: Date.now() }));
@@ -241,7 +254,7 @@ export function Sidebar({
 			if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
 			e.preventDefault();
 			const nextId = getAdjacentSessionId(
-				groups,
+				visibleGroups,
 				collapsedGroups,
 				currentSessionId,
 				e.key === "ArrowUp" ? -1 : 1,
@@ -252,7 +265,7 @@ export function Sidebar({
 		};
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [groups, collapsedGroups, currentSessionId, sessions, handleSelectSession, sessionsOverride]);
+	}, [visibleGroups, collapsedGroups, currentSessionId, sessions, handleSelectSession, sessionsOverride]);
 
 	const toggleGroup = (cwd: string) => {
 		setCollapsedGroups(prev => {
@@ -343,6 +356,8 @@ export function Sidebar({
 			} else {
 				await getBridge().http.archiveSession(item.id);
 				toast("已归档会话", "info");
+				// Archived sessions leave the default list; don't stay parked on the one just archived.
+				if (!showArchived) useAppStore.getState().leaveSession(item.id, { cwd: item.cwd });
 			}
 			await loadSessions();
 		} catch (err) {
@@ -362,9 +377,7 @@ export function Sidebar({
 	const handleConfirmDelete = async (item: SessionListItem) => {
 		try {
 			await getBridge().http.deleteSession(item.id);
-			if (currentSessionId === item.id) {
-				useAppStore.setState({ currentSessionId: null });
-			}
+			useAppStore.getState().leaveSession(item.id, { cwd: item.cwd, drop: true });
 			await loadSessions();
 			toast("会话已移入回收站", "info");
 		} catch (err) {
@@ -536,7 +549,7 @@ export function Sidebar({
 
 							<div className={"grid-collapse " + (collapsed ? "" : "open")}>
 								<div>
-									{group.sessions.map(item => {
+									{preview.sessions.map(item => {
 										const isCurrent = item.id === currentSessionId;
 										const view = views[item.id];
 										const status = getSessionRowStatus(

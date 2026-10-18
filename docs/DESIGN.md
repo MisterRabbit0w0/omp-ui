@@ -71,7 +71,7 @@ omp-ui/
     bridge/
       src/server.ts         # HTTP + WS，鉴权
       src/process.ts        # OmpProcess：spawn、帧解析、v2 分片重组、请求关联
-      src/pool.ts           # 进程池、LRU 回收
+      src/pool.ts           # 弹性进程池：软/硬上限、LRU 与空闲回收
       src/sessions.ts       # 扫描/监听 sessions 目录
       src/files.ts          # @ 提及文件搜索、受限文件读取
       src/config.ts         # ~/.omp-ui/config.json
@@ -94,8 +94,15 @@ omp-ui/
 - 一个打开的会话对应一个 `omp --mode rpc-ui` 子进程，以 `sessionId` 为键。
 - 新会话：`omp --mode rpc-ui --cwd <dir> [--model p/id] [--thinking L] [--approval-mode M]`。
 - 恢复会话：追加 `--resume <sessionFile>`。崩溃恢复用 `--restore <sessionFile>`。
-- 只读预览不 spawn：侧边栏点开一个未激活的会话时，Bridge 直接解析 jsonl 渲染只读视图；用户首次输入或点「继续」时再 spawn（启动约 2–6 秒，期间显示 "启动中"）。
-- 进程池上限默认 6。超限时回收最久未用、`isSettled=true` 且无待答 UI 请求的进程（`SIGTERM`，5 秒后 `SIGKILL`）。正在流式输出或有待答请求的进程永不回收。
+- 只读预览先展示、选中即预热：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史；用户停留约 150 ms 后前端在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"），快速扫过侧边栏只会启动最终停留的那一个。权限切换、模型/思考级别、发送都作用在这个进程上：启动进行中时它们等待同一个启动（权限切换在启动完成后再按新模式重启），不会重复 spawn 或丢失选择。
+- 弹性进程池（`pool.ts`）：
+  - 软上限默认 6（`poolMax`）。超过软上限时立即回收最久未用的空闲进程（`isSettled=true`、未在流式输出、无待答 UI 请求、没有仍在运行的子代理）。
+  - 前端通过 `focus` 告知当前查看的会话；被任一标签页查看的进程被"钉住"，不参与软上限回收，回收顺序为未查看的在前。
+  - 当所有进程都在工作或被查看时池子可以越过软上限扩容，直到硬上限：默认按空闲内存（每进程预算约 300 MB，保留 1 GB）与 CPU 数（×4，最多 32）动态计算，且不低于软上限（`poolHardMax` 可固定）。达到硬上限时先回收空闲进程（含被查看的），仍无可回收时拒绝启动并提示"进程池已满"，绝不杀正在工作的进程。
+  - 子代理（含 `async.enabled` 下的后台 detached 子代理）在 omp 进程内运行，可能在 `session_settled` 之后继续工作。Bridge 按 `subagent_lifecycle`/`subagent_progress` 跟踪仍在运行的子代理 id：有运行中子代理的进程算"忙"（侧边栏显示运行中、不被回收、删除会话返回 409），最后一个结束时广播 `sessions_changed` 并重新平衡。前端在此期间也不会为权限切换重启进程：选择被记为待生效，之后的消息先沿用当前权限，子代理全部结束后的下一次请求前才重启生效。
+- 运行结束（`session_settled`）、子代理结束、切换查看、标签页断开时重新平衡，扩容出来的进程回落到软上限以内。
+  - 空闲回收：未被查看且空闲超过 10 分钟（`poolIdleTtlMs`）的进程即使在软上限内也会被释放。
+  - 回收即 `SIGTERM`，5 秒后 `SIGKILL`；广播 `{t:"proc", state:"exited", reason:"released"}`。前端把视图置为"未启动"（保留历史、不显示退出横幅），下次查看/发送/打开模型菜单时按需重新启动。
 - `omp` 可执行路径：`OMP_UI_OMP_BIN` > `Bun.which("omp")`。启动时运行 `omp --version`，低于 18.11.0 拒绝并提示。
 - stderr 收集到每进程 200KB 环形缓冲，在「诊断」面板可看。
 
@@ -239,6 +246,7 @@ type C2B =
   | { t: "hello"; token: string }
   | { t: "attach"; sessionId: string; sinceSeq?: number }
   | { t: "detach"; sessionId: string }
+  | { t: "focus"; sessionId: string | null }                 // 本标签页正在查看的会话（进程池钉住，§3.1）
   | { t: "start"; reqId: string; cwd: string; resume?: string; restore?: boolean;
       model?: string; thinking?: string; approvalMode?: "always-ask" | "write" | "yolo" }
   | { t: "stop"; sessionId: string }                         // 结束进程
@@ -257,7 +265,7 @@ type B2C =
   | { t: "resync"; sessionId: string }
   | { t: "ui_resolved"; sessionId: string; id: string }
   | { t: "proc"; sessionId: string; state: "starting" | "ready" | "exited" | "crashed";
-      code?: number; stderrTail?: string }
+      reason?: "released"; code?: number; stderrTail?: string }   // released = 进程池回收空闲进程，非错误
   | { t: "sessions_changed" }
   | { t: "error"; reqId?: string; message: string };
 ```
@@ -273,6 +281,7 @@ HTTP（均需 Bearer）
 | GET | `/api/projects` | 去重的 cwd 列表 + 最近使用时间 |
 | GET | `/api/files?cwd=&q=` | @ 提及：`git ls-files` 优先，否则遍历（排除 node_modules/.git），前 50 个模糊匹配 |
 | GET | `/api/file?cwd=&path=` | 受限只读，≤1MB |
+| GET | `/api/git/changes?cwd=&scope=unstaged\|staged` | 只读 git 变更（工作区 / 暂存区，含未跟踪文件；输出有上限） |
 | GET | `/api/export?path=` | 下载 `export_html` 生成的文件（路径必须是该命令返回过的） |
 | GET/PUT | `/api/config` | UI 配置 |
 | GET | `/api/diagnostics/:sessionId` | stderr 尾部、解析错误、帧统计 |
@@ -365,7 +374,7 @@ settling/running ──session_settled──▶ idle
 | `confirm` | 模态确认 | `{confirmed}` |
 | `input` | 模态单行输入；OAuth 流程中紧跟 `open_url` 时并入同一张登录卡 | `{value}` |
 | `editor` | 模态多行编辑器，`prefill` 预填 | `{value}` |
-| `ask` | 对话流内问卷卡：每题一组，单选/多选，`preview` 展开显示，始终有「其他」自由输入，`recommended` 预选 | `{answers:[{id, selectedOptions, customInput?}]}`（按题目顺序） |
+| `ask` | 对话流内问卷卡：锚定到运行中的 `ask` 工具卡（无对应工具行时回退到流末尾）；每题一组，单选/多选，`preview` 展开显示，始终有「其他」自由输入，`recommended` 预选 | `{answers:[{id, selectedOptions, customInput?}]}`（按题目顺序） |
 | `cancel` | 关闭 `targetId` 对应界面，后续回答忽略 | 无 |
 | `notify` | toast | 无 |
 | `setStatus` | 头部状态 chip（`statusText` 为空则移除） | 无 |
@@ -513,7 +522,7 @@ interface ToolRenderer {
 
 - Todo：按 phase 分组，状态图标（pending/in_progress/completed/abandoned/blocked+blocker 文本），`details`/`notes` 展开。可勾选、编辑、增删 → `set_todos`。`todo_reminder` 时面板标题闪一下。
 - 子代理：§10.2。
-- 变更：从对话流汇总所有 `edit`/`write`/`notebook` 成功调用，按文件分组，点击跳到对应工具卡或打开合并 diff。只是对话中的记录，不读 git。
+- 变更：多口径展示。**本会话**汇总所有 `edit`/`write`/`notebook` 成功调用并按文件合并；**最近一轮**只保留最近一次实际改动文件的助手回合；**未暂存 / 已暂存**调用 Bridge 的只读 git API（`git diff` 工作区 / `--cached`，未暂存含未跟踪文件），支持手动刷新。会话口径可点击跳到对应工具卡。
 - Goal：无 goal 时显示创建表单（目标、token 预算）→ `goal {op:"create"}`；有 goal 时显示状态、`tokensUsed/tokenBudget` 进度、用时，按钮暂停/恢复/放弃。
 - 信息：`get_session_stats` 全部字段、`routedModels`、会话文件路径、sessionId、系统提示词（`state.systemPrompt`，折叠）、工具列表（`state.dumpTools`）。
 
@@ -526,7 +535,7 @@ interface ToolRenderer {
   - 账号：`get_login_providers` 列表，登录 → `login`（流程走 `open_url` + `input`），登出 → `get_logout_accounts` 选凭据 → `logout`。登录在一个专门的 "控制进程" 上执行（Bridge 维护的一个 `--no-session` 进程），不依赖具体会话。
   - 默认值：新会话的模型、思考级别、审批模式（存 `~/.omp-ui/config.json`）。
   - 会话行为：steering/follow-up 模式、interrupt 模式、自动压缩、自动重试、cache warming（作用于当前会话）。
-  - 外观：主题、字号、等宽字体、对话宽度、紧凑模式。
+  - 外观：主题、字号（按 12/13/14 缩放全部文本，不改变 16px rem 布局）、等宽字体、对话宽度、紧凑模式（压缩对话流与工具卡的垂直间距）。
   - 通知：桌面通知开关、声音。
   - 快捷键列表（只读）。
 
@@ -536,14 +545,17 @@ interface ToolRenderer {
 
 ### 10.1 数据
 
-`subagent_lifecycle` 建立/更新 `{id, index, agent, agentSource, description, status, sessionFile, parentToolCallId, detached}`；`subagent_progress` 按 `index` 更新 `progress`（原始 `AgentProgress`，通用展示：当前工具、轮次、tokens 等已知字段，其余 JSON）。冷启动用 `get_subagents`。
+`subagent_lifecycle` 建立/更新 `{id, index, agent, agentSource, description, status, sessionFile, parentToolCallId, detached}`；`subagent_progress` 按 `progress.id`（即子代理 id）更新 `progress` 与状态（原始 `AgentProgress`，通用展示：当前工具、轮次、tokens 等已知字段，其余 JSON）。`index` 只是在单次 `task` 调用内的序号，跨调用、跨层级会重复，仅在缺少 `progress.id` 时与 `parentToolCallId` 一起作为兜底键。冷启动/重连用 `get_subagents` 合并：omp 的名册会剔除已结束的子代理，所以已见过的结束项保留（树的父节点不丢），名册里没有的"运行中"项视为已在离线期间结束并移除。进程退出/崩溃时仍在运行的子代理标为中止。
+
+**树形关系**：omp 子代理可以再派生子代理，id 为点分层级（`Anna.Bob` 是 Anna 派生的 Bob），所有层级的事件都经同一条 RPC 流到达；`parentToolCallId` 是所属 `task` 调用在其父（子）会话中的工具调用 id。前端据此建树：父节点 = 已知子代理中最长的点分前缀（中间层缺失时挂到最近的已知祖先，否则为根），同层按 `index`、id 排序。
 
 ### 10.2 呈现
 
-- 在 `task` 工具卡内按 `parentToolCallId` 嵌入子代理行：代理名、描述、状态、实时进度一行。
-- 右侧面板列出全部（含 detached 后台任务）。
+- 在 `task` 工具卡内按 `parentToolCallId` 嵌入直接子代理行：代理名、描述、状态、实时进度一行；有后代时显示 "+N 子代理"，展开后递归嵌套显示其子树。
+- 右侧面板按树的先序列出全部（含 detached 后台任务），按层级缩进，父行显示后代数量。
 - 点击打开抽屉：`get_subagent_messages {subagentId, fromByte}` 增量读取（运行中每 1.5s 轮询，用 `nextByte`，`reset:true` 时清空重来），用同一套对话流组件只读渲染。抽屉打开期间将订阅升到 `events` 以获得实时流，关闭后降回 `progress`。
-- 抽屉底部：输入框 → `steer_subagent`；「终止」→ `cancel_subagent`（确认）。
+- 抽屉顶部显示层级导航：「上级」面包屑（可点回祖先）与「下级」子代理标签（可直接打开）。
+- 抽屉底部：输入框 → `steer_subagent`；「终止」→ `cancel_subagent`（确认，omp 连同其后代一并终止，前端同步把运行中的后代标为中止）。
 
 ---
 

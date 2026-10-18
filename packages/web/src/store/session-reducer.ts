@@ -145,12 +145,11 @@ export function resolveUi(
 	const cleared = request.method === "input" && view.lastOpenUrl !== undefined ? { ...view, pendingUi, lastOpenUrl: undefined } : { ...view, pendingUi };
 	if (!isTrackedUiRequest(request)) return cleared;
 	let toolCallId: string | undefined;
-	if (isApprovalRequest(request)) {
-		const approval = parseApproval(request);
-		if (approval) {
-			for (const exec of view.toolExec.values()) {
-				if (exec.status === "running" && toolNamesMatch(exec.toolName, approval.toolName)) toolCallId = exec.toolCallId;
-			}
+	const approval = isApprovalRequest(request) ? parseApproval(request) : null;
+	const toolName = approval?.toolName ?? (request.method === "ask" ? "ask" : undefined);
+	if (toolName) {
+		for (const exec of view.toolExec.values()) {
+			if (exec.status === "running" && toolNamesMatch(exec.toolName, toolName)) toolCallId = exec.toolCallId;
 		}
 	}
 	const entry: AnsweredUi = { request, ...info, ...(toolCallId !== undefined ? { toolCallId } : {}) };
@@ -166,6 +165,14 @@ export function approvalReceiptKind(entry: AnsweredUi, result?: ToolResultMessag
 	if (r && "cancelled" in r) return r.timedOut ? "timed_out" : "denied";
 	if (r && "value" in r) return r.value === DENY ? "denied" : "approved";
 	return result?.isError ? "denied" : "approved";
+}
+
+/**
+ * Latest answered *approval* for a tool call. Ask answers share `toolCallId` with their tool but must
+ * render as an ask summary, never as an approval receipt.
+ */
+export function answeredApprovalFor(answered: ReadonlyArray<AnsweredUi> | undefined, toolCallId: string): AnsweredUi | undefined {
+	return answered?.findLast(a => a.toolCallId === toolCallId && isApprovalRequest(a.request));
 }
 
 /** One-line summaries `[question, answer]` for an answered ask. */
@@ -222,10 +229,12 @@ export interface SessionView {
 	statsStale: boolean;
 	/** Approval mode this session's process was started with (omp has no RPC to read it back); undefined = unknown, use the config default. */
 	approvalMode?: ApprovalMode;
+	/** Mode picked while a run was active; applied (process restart) right before the next prompt is sent. */
+	pendingApprovalMode?: ApprovalMode;
 	effects: SessionEffect[];
 }
 
-export function createSessionView(sessionId: string, init?: Partial<Pick<SessionView, "proc" | "readonly" | "title" | "approvalMode">>): SessionView {
+export function createSessionView(sessionId: string, init?: Partial<Pick<SessionView, "proc" | "readonly" | "title" | "approvalMode" | "pendingApprovalMode">>): SessionView {
 	return {
 		sessionId,
 		proc: init?.proc ?? "none",
@@ -234,6 +243,7 @@ export function createSessionView(sessionId: string, init?: Partial<Pick<Session
 		state: null,
 		title: init?.title,
 		approvalMode: init?.approvalMode,
+		pendingApprovalMode: init?.pendingApprovalMode,
 		messages: [],
 		drafts: new Map(),
 		toolExec: new Map(),
@@ -312,6 +322,8 @@ export function reduceProc(view: SessionView, proc: ProcState, info?: { code?: n
 		return {
 			...view,
 			proc,
+			// In-process subagents died with it.
+			subagents: abortRunningSubagents(view.subagents),
 			run: { kind: "dead", crashed, code: info?.code, stderrTail: info?.stderrTail },
 			banners: upsertBanner(view.banners, { kind: "proc-exit", crashed, code: info?.code, stderrTail: info?.stderrTail }),
 		};
@@ -320,9 +332,23 @@ export function reduceProc(view: SessionView, proc: ProcState, info?: { code?: n
 	return { ...view, proc, run, banners: view.banners.filter(b => b.kind !== "proc-exit") };
 }
 
+/**
+ * The bridge released an idle process to free resources (§3.1): not an error. The transcript stays, no exit
+ * banner; the next interaction (opening it, sending, picking a model) starts a fresh process.
+ */
+export function releaseProc(view: SessionView): SessionView {
+	return {
+		...view,
+		proc: "none",
+		run: view.run.kind === "dead" ? view.run : { kind: "idle" },
+		pendingUi: [],
+		banners: view.banners.filter(b => b.kind !== "proc-exit"),
+	};
+}
+
 /** Discard everything server-owned; the store follows with a cold start (§3.4 resync). */
 export function resetForResync(view: SessionView): SessionView {
-	return createSessionView(view.sessionId, { proc: view.proc === "none" ? "none" : view.proc, title: view.title, approvalMode: view.approvalMode });
+	return createSessionView(view.sessionId, { proc: view.proc === "none" ? "none" : view.proc, title: view.title, approvalMode: view.approvalMode, pendingApprovalMode: view.pendingApprovalMode });
 }
 
 export function reduce(view: SessionView, frame: RpcServerFrame, ctx: { live: boolean }): SessionView {
@@ -678,23 +704,40 @@ export function reduce(view: SessionView, frame: RpcServerFrame, ctx: { live: bo
 		case "subagent_progress": {
 			const p = frame.payload;
 			const subagents = new Map(view.subagents);
-			let key = `idx-${p.index}`;
-			for (const [id, s] of subagents) {
-				if (s.index === p.index) {
-					key = id;
-					break;
+			// `progress.id` is the subagent id (omp's AgentProgress). `index` is only the position within one task
+			// call, so it repeats across calls and nesting levels: fall back to it (with the owning call) only when
+			// the id is missing.
+			const progressId = typeof p.progress.id === "string" && p.progress.id.length > 0 ? p.progress.id : undefined;
+			let key = progressId ?? `idx-${p.parentToolCallId ?? ""}-${p.index}`;
+			if (progressId === undefined) {
+				let loose: string | undefined;
+				for (const [id, s] of subagents) {
+					if (s.index !== p.index) continue;
+					if (s.parentToolCallId === p.parentToolCallId) {
+						loose = undefined;
+						key = id;
+						break;
+					}
+					// No owning call on the frame: accept an index-only match.
+					if (p.parentToolCallId === undefined && loose === undefined) loose = id;
 				}
+				if (loose !== undefined) key = loose;
 			}
 			const prev = subagents.get(key);
+			const progressStatus = p.progress.status;
+			const status: SubagentStatus | undefined =
+				progressStatus === "pending" || progressStatus === "running" || progressStatus === "completed" || progressStatus === "failed" || progressStatus === "aborted"
+					? progressStatus
+					: undefined;
 			subagents.set(key, {
 				id: prev?.id ?? key,
 				index: p.index,
 				agent: p.agent,
 				agentSource: p.agentSource,
-				description: prev?.description,
 				task: p.task,
 				assignment: p.assignment ?? prev?.assignment,
-				status: prev?.status ?? "running",
+				description: (typeof p.progress.description === "string" ? p.progress.description : undefined) ?? prev?.description,
+				status: status ?? prev?.status ?? "running",
 				sessionFile: p.sessionFile ?? prev?.sessionFile,
 				parentToolCallId: p.parentToolCallId ?? prev?.parentToolCallId,
 				detached: p.detached ?? prev?.detached,
@@ -900,6 +943,34 @@ export function selectChangedFiles(view: SessionView): ChangedFile[] {
 		}
 	}
 	return out;
+}
+
+/** Subagents started and not ended (pending or running), nested and background ones included. */
+export function hasRunningSubagents(view: Pick<SessionView, "subagents">): boolean {
+	for (const s of view.subagents.values()) if (s.status === "running" || s.status === "pending") return true;
+	return false;
+}
+
+function abortRunningSubagents(subagents: Map<string, SubagentView>): Map<string, SubagentView> {
+	if (!hasRunningSubagents({ subagents })) return subagents;
+	const next = new Map(subagents);
+	for (const [id, s] of next) {
+		if (s.status === "running" || s.status === "pending") next.set(id, { ...s, status: "aborted", lastUpdate: Date.now() });
+	}
+	return next;
+}
+
+/**
+ * Cold start / resync: the live roster (get_subagents) wins. omp prunes ended subagents from it, so finished ones
+ * we already saw are kept (the tree keeps its parents); running ones missing from it ended unseen and are dropped.
+ */
+export function mergeSubagentSnapshots(previous: Map<string, SubagentView>, snapshots: SubagentSnapshot[]): Map<string, SubagentView> {
+	const merged = new Map<string, SubagentView>();
+	for (const [id, s] of previous) {
+		if (s.status !== "running" && s.status !== "pending") merged.set(id, s);
+	}
+	for (const [id, s] of subagentsFromSnapshots(snapshots)) merged.set(id, { ...s, detached: previous.get(id)?.detached });
+	return merged;
 }
 
 /** Cold-start subagent snapshots (get_subagents) into the view map. */

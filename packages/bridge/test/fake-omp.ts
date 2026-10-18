@@ -48,7 +48,7 @@ const messages: Record<string, unknown>[] = [];
 let lastEntryId: string | null = null;
 let headerWritten = false;
 let entrySeq = 0;
-const currentModel = argAfter("--model") ?? "fake/model";
+let currentModel = argAfter("--model") ?? "fake/model";
 let currentThinking = argAfter("--thinking") ?? "high";
 if (rich) {
 	const resumeFile = argAfter("--resume") ?? argAfter("--restore");
@@ -171,6 +171,8 @@ const assistantMessage = (text: string, toolCall?: Record<string, unknown>): Rec
 	timestamp: Date.now(),
 });
 
+const backgroundSubagents = new Set<string>();
+
 const runPrompt = async (commandId: unknown, message: string): Promise<void> => {
 	const messageId = `m-${++messageSeq}`;
 	const big = message.includes("BIGFRAME");
@@ -219,6 +221,17 @@ const runPrompt = async (commandId: unknown, message: string): Promise<void> => 
 	emit({ type: "message_start", messageId: `${messageId}-r`, message: toolResult });
 	emit({ type: "message_end", messageId: `${messageId}-r`, message: toolResult });
 	emit({ type: "turn_end", message: assistantMessage(text, toolCall), toolResults: [toolResult] });
+	// BGSUB: a detached background subagent (with a nested child) keeps running past the settle, like omp's
+	// `async.enabled` task jobs; `cancel_subagent` ends it.
+	if (message.includes("BGSUB")) {
+		for (const [subId, index] of [["Bg", 0], ["Bg.Child", 0]] as const) {
+			backgroundSubagents.add(subId);
+			emit({
+				type: "subagent_lifecycle",
+				payload: { id: subId, agent: "task", agentSource: "bundled", status: "started", index, parentToolCallId: subId === "Bg" ? "call-1" : "call-bg-1", detached: true },
+			});
+		}
+	}
 	emit({ type: "agent_end", messages: [assistantMessage(text, toolCall), toolResult], yielded: true });
 	emit({ type: "prompt_result", agentInvoked: true, status: "completed", sessionSettled: true, id: commandId });
 	emit({ type: "session_settled" });
@@ -288,22 +301,44 @@ const runRichPrompt = async (commandId: unknown, message: string): Promise<void>
 		emit({ type: "message_end", messageId, message: final });
 		persist(final);
 	} else if (message.includes("ASK")) {
-		const final = richAssistant([{ type: "text", text }], "stop");
-		update({ type: "done", reason: "stop", message: final });
+		const question = { id: "q1", question: "Pick a color?", options: [{ label: "Red" }, { label: "Blue" }], recommended: 0 };
+		const toolCall = { id: `call-${messageSeq}`, name: "ask", arguments: { questions: [question] } };
+		const final = richAssistant([{ type: "text", text }, { type: "toolCall", ...toolCall }], "toolUse");
+		update({ type: "done", reason: "toolUse", message: final });
 		emit({ type: "message_end", messageId, message: final });
 		persist(final);
+		emit({ type: "tool_execution_start", toolCallId: toolCall.id, toolName: "ask", args: toolCall.arguments });
 		const uiId = `ui-${++uiSeq}`;
 		const answered = waitUi(uiId);
 		emit({
 			type: "extension_ui_request",
 			id: uiId,
 			method: "ask",
-			questions: [{ id: "q1", question: "Pick a color?", options: [{ label: "Red" }, { label: "Blue" }], recommended: 0 }],
+			questions: [question],
 		});
 		const response = await answered;
 		const answers = Array.isArray(response.answers) ? (response.answers as { selectedOptions?: string[] }[]) : [];
 		const chosen = answers[0]?.selectedOptions?.join(",") ?? "(cancelled)";
-		const reply = richAssistant([{ type: "text", text: `you chose: ${chosen}` }], "stop");
+		const resultText = `you chose: ${chosen}`;
+		emit({
+			type: "tool_execution_end",
+			toolCallId: toolCall.id,
+			toolName: "ask",
+			result: { content: [{ type: "text", text: resultText }], details: { answers } },
+		});
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: "ask",
+			content: [{ type: "text", text: resultText }],
+			details: { answers },
+			isError: false,
+			timestamp: Date.now(),
+		};
+		emit({ type: "message_start", messageId: `${messageId}-r`, message: toolResult });
+		emit({ type: "message_end", messageId: `${messageId}-r`, message: toolResult });
+		persist(toolResult);
+		const reply = richAssistant([{ type: "text", text: resultText }], "stop");
 		emit({ type: "message_start", messageId: `${messageId}-2`, message: reply });
 		emit({ type: "message_end", messageId: `${messageId}-2`, message: reply });
 		persist(reply);
@@ -421,6 +456,13 @@ const handleRich = (cmd: Record<string, unknown>): boolean => {
 			if (typeof cmd.level === "string") currentThinking = cmd.level;
 			respond(id, type);
 			return true;
+		case "set_model": {
+			const provider = typeof cmd.provider === "string" ? cmd.provider : "fake";
+			const modelId = typeof cmd.modelId === "string" ? cmd.modelId : "";
+			currentModel = `${provider}/${modelId}`;
+			respond(id, type, activeModel());
+			return true;
+		}
 		case "prompt":
 			respond(id, type);
 			void runRichPrompt(id, typeof cmd.message === "string" ? cmd.message : "");
@@ -532,6 +574,16 @@ const handleCommand = (cmd: Record<string, unknown>): void => {
 					respondError(id, type, err instanceof Error ? err.message : String(err));
 				}
 			})();
+			return;
+		}
+		case "cancel_subagent": {
+			const target = typeof cmd.subagentId === "string" ? cmd.subagentId : "";
+			const ended = [...backgroundSubagents].filter(subId => subId === target || subId.startsWith(`${target}.`)).reverse();
+			for (const subId of ended) {
+				backgroundSubagents.delete(subId);
+				emit({ type: "subagent_lifecycle", payload: { id: subId, agent: "task", agentSource: "bundled", status: "aborted", index: 0 } });
+			}
+			respond(id, type, { cancelled: ended.length > 0 });
 			return;
 		}
 		case "prompt":

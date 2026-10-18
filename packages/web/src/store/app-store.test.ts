@@ -97,7 +97,10 @@ function recordingClient(sessionIds: string[]): { client: BridgeClient; calls: s
 			return { sessionId, sessionFile: `/tmp/${sessionId}.jsonl` };
 		},
 		resolveReqId: () => undefined,
-		rpc: async () => ({}),
+		rpc: async (_id: string, cmd: { type: string }) => {
+			calls.push(`rpc:${cmd.type}`);
+			return {};
+		},
 	};
 	return { client: client as unknown as BridgeClient, calls, starts };
 }
@@ -235,22 +238,145 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().sessions.map(s => s.id)).toEqual(["s3-new"]);
 	});
 
-	test("refuses while a run is in progress; a preview only remembers the mode", async () => {
+	test("while a run is in progress the pick is deferred; a preview only remembers the mode", async () => {
 		const { client, calls } = recordingClient(["s4"]);
 		const store = createAppStore({ client, http: {} as BridgeHttp });
 		store.setState({
 			sessions: [sessionItem("s4"), sessionItem("s5")],
 			views: {
-				s4: readyView("s4", { run: { kind: "running" } }),
+				s4: readyView("s4", { run: { kind: "running" }, approvalMode: "write" }),
 				s5: { ...createSessionView("s5", { readonly: true }) },
 			},
 		});
 		await store.getState().restartWithApprovalMode("s4", "yolo");
 		expect(calls).toEqual([]);
-		expect(store.getState().views.s4!.approvalMode).toBeUndefined();
+		expect(store.getState().views.s4!.approvalMode).toBe("write");
+		expect(store.getState().views.s4!.pendingApprovalMode).toBe("yolo");
+		// picking the mode the process already runs with cancels the deferred switch
+		await store.getState().restartWithApprovalMode("s4", "write");
+		expect(store.getState().views.s4!.pendingApprovalMode).toBeUndefined();
 		await store.getState().restartWithApprovalMode("s5", "yolo");
 		expect(calls).toEqual([]);
 		expect(store.getState().views.s5!.approvalMode).toBe("yolo");
+	});
+
+	test("a deferred pick is applied right before the next prompt once idle", async () => {
+		const { client, calls, starts } = recordingClient(["s7"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s7")],
+			currentSessionId: "s7",
+			views: { s7: readyView("s7", { approvalMode: "write", pendingApprovalMode: "yolo" }) },
+		});
+		await store.getState().sendPrompt("s7", "hello");
+		expect(starts).toEqual([expect.objectContaining({ cwd: "/work", approvalMode: "yolo" })]);
+		expect(calls.indexOf("start:s7")).toBeLessThan(calls.findIndex(c => c.startsWith("rpc:prompt")));
+		expect(store.getState().views.s7!.approvalMode).toBe("yolo");
+		expect(store.getState().views.s7!.pendingApprovalMode).toBeUndefined();
+	});
+
+	test("background subagents defer the switch even when the run is idle", async () => {
+		const { client, calls, starts } = recordingClient(["sb"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		const bg = { id: "Bg", index: 0, agent: "task", agentSource: "bundled" as const, status: "running" as const, detached: true, lastUpdate: 1 };
+		store.setState({
+			sessions: [sessionItem("sb")],
+			currentSessionId: "sb",
+			views: { sb: readyView("sb", { approvalMode: "write", subagents: new Map([["Bg", bg]]) }) },
+		});
+		await store.getState().restartWithApprovalMode("sb", "yolo");
+		expect(starts).toEqual([]);
+		expect(store.getState().views.sb!.pendingApprovalMode).toBe("yolo");
+		// the next prompt still goes out under the old mode while the subagent runs
+		await store.getState().sendPrompt("sb", "hello");
+		expect(starts).toEqual([]);
+		expect(calls.some(c => c.startsWith("rpc:prompt"))).toBe(true);
+		expect(store.getState().views.sb!.pendingApprovalMode).toBe("yolo");
+		expect(store.getState().toasts.some(t => t.message.includes("后台子代理"))).toBe(true);
+		// once it finished, the deferred pick applies before the next prompt
+		store.setState(s => ({
+			views: { ...s.views, sb: { ...s.views.sb!, run: { kind: "idle" }, subagents: new Map([["Bg", { ...bg, status: "completed" as const }]]) } },
+		}));
+		await store.getState().sendPrompt("sb", "again");
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "yolo" })]);
+	});
+
+	test("a deferred pick never restarts the process for a steer into a live run", async () => {
+		const { client, starts } = recordingClient(["s8"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s8")],
+			views: { s8: readyView("s8", { run: { kind: "running" }, approvalMode: "write", pendingApprovalMode: "yolo" }) },
+		});
+		await store.getState().sendPrompt("s8", "steer me");
+		expect(starts).toEqual([]);
+		expect(store.getState().views.s8!.pendingApprovalMode).toBe("yolo");
+	});
+
+	test("a follow-up queued during the run waits, applies the deferred pick, then goes out as a prompt", async () => {
+		const { client, calls, starts } = recordingClient(["s9"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s9")],
+			currentSessionId: "s9",
+			views: { s9: readyView("s9", { run: { kind: "running" }, approvalMode: "yolo", pendingApprovalMode: "always-ask" }) },
+		});
+		const sending = store.getState().sendPrompt("s9", "after this run", { mode: "followUp" });
+		await Bun.sleep(0);
+		// never handed to the old (yolo) process
+		expect(calls.some(c => c === "rpc:follow_up")).toBe(false);
+		expect(starts).toEqual([]);
+		store.setState(s => ({ views: { ...s.views, s9: { ...s.views.s9!, run: { kind: "idle" } } } }));
+		await sending;
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "always-ask" })]);
+		expect(calls.indexOf("start:s9")).toBeLessThan(calls.indexOf("rpc:prompt"));
+		expect(calls).not.toContain("rpc:follow_up");
+		expect(store.getState().views.s9!.approvalMode).toBe("always-ask");
+	}, { timeout: 5_000 });
+
+	test("an interrupt with a deferred pick aborts, applies the new mode, then prompts", async () => {
+		const { client, calls, starts } = recordingClient(["s10"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s10")],
+			views: { s10: readyView("s10", { run: { kind: "running" }, approvalMode: "yolo", pendingApprovalMode: "write" }) },
+		});
+		const sending = store.getState().sendPrompt("s10", "stop and do this", { mode: "interrupt" });
+		await Bun.sleep(0);
+		expect(calls).toContain("rpc:abort");
+		expect(calls).not.toContain("rpc:abort_and_prompt");
+		store.setState(s => ({ views: { ...s.views, s10: { ...s.views.s10!, run: { kind: "idle" } } } }));
+		await sending;
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "write" })]);
+		expect(calls.indexOf("rpc:abort")).toBeLessThan(calls.indexOf("start:s10"));
+		expect(calls.indexOf("start:s10")).toBeLessThan(calls.indexOf("rpc:prompt"));
+	}, { timeout: 5_000 });
+
+	test("deleting a session also forgets its unread/attention state", () => {
+		const { client } = recordingClient([]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("gone"), sessionItem("kept")],
+			views: { gone: readyView("gone"), kept: readyView("kept") },
+			attention: { gone: 200, kept: 100 },
+			todoFlash: { gone: 1 },
+		});
+		store.getState().leaveSession("gone", { drop: true });
+		expect(store.getState().attention).toEqual({ kept: 100 });
+		expect(store.getState().todoFlash).toEqual({});
+		expect(store.getState().views.gone).toBeUndefined();
+	});
+
+	test("a follow-up without a deferred pick is still queued into the live run", async () => {
+		const { client, calls, starts } = recordingClient(["s11"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s11")],
+			views: { s11: readyView("s11", { run: { kind: "running" }, approvalMode: "write" }) },
+		});
+		await store.getState().sendPrompt("s11", "later", { mode: "followUp" });
+		expect(calls).toContain("rpc:follow_up");
+		expect(starts).toEqual([]);
 	});
 
 	test("a failed start toasts and leaves the session exited instead of stuck on 'starting'", async () => {
@@ -271,3 +397,95 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().views.s6!.proc).toBe("exited");
 	});
 });
+
+describe("process warm-up and release (§3.1)", () => {
+	const previewItem = (id: string) => ({ ...sessionItem(id), live: false });
+	const transcriptHttp = { getTranscript: async () => [{ role: "user", content: "old", timestamp: 1 }] } as unknown as BridgeHttp;
+
+	test("selecting a session shows the preview and warms its process right away", async () => {
+		const { client, calls, starts } = recordingClient(["p1"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		store.setState({ sessions: [previewItem("p1")], config: { archived: [], recentProjects: [], defaultApprovalMode: "always-ask" } });
+		await store.getState().openSession(previewItem("p1"));
+		await waitUntil(() => store.getState().views.p1?.readonly === false);
+		expect(starts).toEqual([expect.objectContaining({ cwd: "/work", resume: "/tmp/p1.jsonl", approvalMode: "always-ask" })]);
+		expect(calls).toContain("attach:p1");
+	});
+
+	test("skimming the sidebar only warms the session the user stays on", async () => {
+		const { client, starts } = recordingClient(["b"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 20 });
+		store.setState({ sessions: [previewItem("a"), previewItem("b")] });
+		await store.getState().openSession(previewItem("a"));
+		await store.getState().openSession(previewItem("b"));
+		await waitUntil(() => starts.length > 0);
+		await Bun.sleep(40);
+		expect(starts.map(s => s.resume)).toEqual(["/tmp/b.jsonl"]);
+	});
+
+	test("a permission picked while the warm-up is in flight is applied once it lands", async () => {
+		const { client, starts } = recordingClient(["p2"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		const original = client.start.bind(client);
+		let landed!: () => void;
+		const gate = new Promise<void>(resolve => (landed = resolve));
+		(client as { start: typeof client.start }).start = async opts => {
+			const result = await original(opts);
+			if (starts.length === 1) await gate;
+			return result;
+		};
+		// Like the bridge: attaching replies with the process state.
+		const attach = client.attach.bind(client);
+		(client as { attach: typeof client.attach }).attach = id => {
+			attach(id);
+			store.getState().dispatch({ t: "proc", sessionId: id, state: "ready" });
+		};
+		store.setState({ sessions: [previewItem("p2")] });
+		await store.getState().openSession(previewItem("p2"));
+		expect(store.getState().views.p2!.proc).toBe("starting");
+		const switched = store.getState().restartWithApprovalMode("p2", "yolo");
+		landed();
+		await switched;
+		expect(starts).toHaveLength(2);
+		expect(starts.at(-1)?.approvalMode).toBe("yolo");
+		expect(store.getState().views.p2!.approvalMode).toBe("yolo");
+	});
+
+	test("a released process keeps the transcript without an exit banner and warms again on return", async () => {
+		const { client, starts } = recordingClient(["r1"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		const item = sessionItem("r1");
+		store.setState({
+			sessions: [{ ...item, live: false }],
+			currentSessionId: null,
+			views: { r1: readyView("r1", { messages: [{ role: "user", content: "hi", timestamp: 1 }] }) },
+		});
+		store.getState().dispatch({ t: "proc", sessionId: "r1", state: "exited", reason: "released" });
+		const view = store.getState().views.r1!;
+		expect(view.proc).toBe("none");
+		expect(view.run.kind).toBe("idle");
+		expect(view.banners.some(b => b.kind === "proc-exit")).toBe(false);
+		expect(view.messages).toHaveLength(1);
+		await store.getState().openSession({ ...item, live: false });
+		await waitUntil(() => starts.length === 1);
+		expect(starts[0]).toMatchObject({ resume: "/tmp/r1.jsonl" });
+	});
+
+	test("the bridge is told which session this tab shows", () => {
+		const focused: (string | null)[] = [];
+		const { client } = recordingClient(["f"]);
+		(client as unknown as { focus: (id: string | null) => void }).focus = id => void focused.push(id);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({ currentSessionId: "f" });
+		store.getState().startWelcome();
+		expect(focused).toEqual(["f", null]);
+	});
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) throw new Error("waitUntil timed out");
+		await Bun.sleep(2);
+	}
+}

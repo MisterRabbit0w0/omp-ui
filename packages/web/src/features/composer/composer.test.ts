@@ -51,6 +51,7 @@ import {
 	getSendButtonState,
 	groupModelsByProvider,
 	groupSlashCommands,
+	orderSlashRows,
 	imageContentToAttachment,
 	isModalUiRequest,
 	isOAuthCodeInputRequest,
@@ -445,6 +446,23 @@ describe("composer › slash (/) and @ file trigger detection & insertion", () =
 			end: 4,
 		});
 		expect(aliasMatch.map(r => r.command.name)).toEqual(["clear"]);
+	});
+
+	test("Enter/arrow selection follows the grouped menu order, not the cross-source name sort", () => {
+		const commands: AvailableSlashCommand[] = [
+			{ name: "alpha", source: "skill", description: "s" },
+			{ name: "beta", source: "builtin", description: "b" },
+			{ name: "gamma", source: "skill", description: "s" },
+			{ name: "delta", source: "builtin", description: "b" },
+		];
+		const trigger = { kind: "slash" as const, query: "", start: 0, end: 1 };
+		const filtered = filterSlashCommands(commands, trigger);
+		// raw filter order interleaves sources; the menu shows builtin first, then skill
+		expect(filtered.map(r => r.command.name)).toEqual(["alpha", "beta", "delta", "gamma"]);
+		const ordered = orderSlashRows(filtered);
+		expect(ordered.map(r => r.command.name)).toEqual(["beta", "delta", "alpha", "gamma"]);
+		const displayed = groupSlashCommands(filtered).flatMap(g => g.items.map(r => r.command.name));
+		expect(ordered.map(r => r.command.name)).toEqual(displayed);
 	});
 });
 

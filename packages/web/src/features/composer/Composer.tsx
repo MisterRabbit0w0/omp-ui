@@ -15,11 +15,12 @@ import {
 import { useAppStore, type SendMode } from "@/store/app-store";
 import { getBridge, updateSessionView } from "@/store/bridge-access";
 import { useSessionView } from "@/store/hooks";
-import type { SessionView } from "@/store/session-reducer";
+import { hasRunningSubagents, type SessionView } from "@/store/session-reducer";
 import { Kbd } from "@/ui/Chip";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/ui/Menu";
 import { Tooltip } from "@/ui/Tooltip";
 import { ModelThinkingButton, thinkingSegments } from "./ModelSelector";
+import { BranchMenuButton } from "./BranchMenu";
 import { PermissionChip } from "./PermissionChip";
 import { ProjectMenuButton } from "./ProjectMenu";
 import { resolveSessionConfig } from "./new-session-config";
@@ -33,6 +34,7 @@ import {
 	detectMenuTrigger,
 	downscaleImageFile,
 	filterSlashCommands,
+	orderSlashRows,
 	getSendButtonState,
 	isComposerDisabled,
 	isRunBusy,
@@ -153,6 +155,7 @@ export function Composer({
 	const pushToast = useAppStore(s => s.pushToast);
 	const welcomeRequest = useAppStore(s => s.welcomeRequest);
 	const restartWithApprovalMode = useAppStore(s => s.restartWithApprovalMode);
+	const startSession = useAppStore(s => s.startSession);
 
 	const [text, setText] = useState<string>(() =>
 		initialText !== undefined ? initialText : loadSessionDraft(sessionId),
@@ -205,13 +208,14 @@ export function Composer({
 	const currentThinking: ThinkingLevel = welcome ? (resolved.thinking ?? "inherit") : (view?.state?.thinkingLevel ?? "high");
 	const approvalMode: ApprovalMode = welcome
 		? resolved.approvalMode
-		: (view?.approvalMode ?? config?.defaultApprovalMode ?? "write");
+		: (view?.pendingApprovalMode ?? view?.approvalMode ?? config?.defaultApprovalMode ?? "write");
 
 	const acceptsImages = canModelAcceptImages(currentModel);
 
 	// The catalog spawns `omp models --json` (seconds), so only fetch it when the welcome composer needs it.
+	// Refresh on every mount: the bridge answers from cache unless omp's config/models files changed (e.g. edited in the omp terminal).
 	useEffect(() => {
-		if (sessionId === null) void loadModelCatalog();
+		if (sessionId === null) void loadModelCatalog(true);
 	}, [sessionId, loadModelCatalog]);
 
 	// 新对话 / Ctrl+N / group "+" land here: preselect the project, then focus the input.
@@ -279,8 +283,18 @@ export function Composer({
 					? rawTrigger
 					: null;
 
+	// Same order the menu renders (grouped by source): the highlight index, arrow keys and Enter/Tab must all agree.
 	const slashRows =
-		activeTrigger?.kind === "slash" ? filterSlashCommands(view?.commands ?? [], activeTrigger) : [];
+		activeTrigger?.kind === "slash" ? orderSlashRows(filterSlashCommands(view?.commands ?? [], activeTrigger)) : [];
+
+	// The model/thinking selectors need a live omp process. A read-only preview starts one only when the user
+	// actually opens that menu (not on every sidebar click), sharing any in-flight start.
+	useEffect(() => {
+		if (!modelOpen || sessionId === null) return;
+		const v = useAppStore.getState().views[sessionId];
+		if (!v || !(v.readonly || v.proc === "none" || v.proc === "exited" || v.proc === "crashed")) return;
+		startSession(sessionId).catch(err => pushToast("error", err instanceof Error ? err.message : "会话启动失败"));
+	}, [modelOpen, sessionId, startSession, pushToast]);
 
 	// Reset menu highlight index when query changes
 	useEffect(() => {
@@ -381,6 +395,8 @@ export function Composer({
 	const proc = view?.proc ?? "ready";
 	const readonly = view?.readonly ?? false;
 	const busy = isRunBusy(runKind);
+	// Background subagents run inside the session process: a permission restart would kill them.
+	const subagentsBusy = view ? hasRunningSubagents(view) : false;
 	const { disabled: composerDisabled, reason: disabledReason } = isComposerDisabled(proc, runKind, readonly);
 
 	const sendButtonState = getSendButtonState({
@@ -659,6 +675,17 @@ export function Composer({
 		}
 	};
 
+	/**
+	 * Model/thinking RPCs need a live process. While the lazy start (menu open on a preview / exited session) is
+	 * still in flight, a quick pick waits for that same start instead of failing with "no live process".
+	 */
+	const ensureLive = async (id: string): Promise<void> => {
+		const v = useAppStore.getState().views[id];
+		if (v && (v.readonly || v.proc === "none" || v.proc === "starting" || v.proc === "exited" || v.proc === "crashed")) {
+			await startSession(id);
+		}
+	};
+
 	const handleSelectModel = async (model: ModelInfo) => {
 		setSweepKey(k => k + 1);
 		if (!sessionId) {
@@ -666,6 +693,7 @@ export function Composer({
 			return;
 		}
 		try {
+			await ensureLive(sessionId);
 			const updated = await getBridge().rpc(sessionId, {
 				type: "set_model",
 				provider: model.provider,
@@ -686,6 +714,7 @@ export function Composer({
 			return;
 		}
 		try {
+			await ensureLive(sessionId);
 			await getBridge().rpc(sessionId, { type: "set_thinking_level", level });
 			updateSessionView(sessionId, v => ({
 				...v,
@@ -707,6 +736,7 @@ export function Composer({
 	const handleToggleFastMode = async (enabled: boolean) => {
 		if (!sessionId) return;
 		try {
+			await ensureLive(sessionId);
 			const res = await getBridge().rpc(sessionId, { type: "set_fast_mode", enabled });
 			updateSessionView(sessionId, v => ({
 				...v,
@@ -722,6 +752,7 @@ export function Composer({
 	const handleToggleSlowMode = async (enabled: boolean) => {
 		if (!sessionId) return;
 		try {
+			await ensureLive(sessionId);
 			const res = await getBridge().rpc(sessionId, { type: "set_slow_mode", enabled });
 			updateSessionView(sessionId, v => ({
 				...v,
@@ -933,7 +964,8 @@ export function Composer({
 			mode={approvalMode}
 			context={welcome ? "welcome" : "session"}
 			restarting={restartingProc}
-			locked={busy || bashRunning}
+			locked={bashRunning}
+			deferred={busy ? true : subagentsBusy ? "subagents" : false}
 			disabled={composerDisabled && !restartingProc}
 			open={permissionOpen}
 			onOpenChange={setPermissionOpen}
@@ -1171,6 +1203,11 @@ export function Composer({
 						disabled={composerDisabled}
 						open={projectOpen}
 						onOpenChange={setProjectOpen}
+					/>
+					<BranchMenuButton
+						cwd={resolved.cwd}
+						running={sessions.some(s => s.cwd === resolved.cwd && s.running)}
+						disabled={composerDisabled}
 					/>
 				</div>
 			)}

@@ -36,6 +36,23 @@ test("panel tabs switch", async ({ app }) => {
 	}
 });
 
+test("clicking the same file chip again returns the 变更 tab from a git scope to the session diff", async ({ app }) => {
+	await liveSession(app);
+	const focusFile = () =>
+		app.evaluate(() => {
+			const detail = { tab: "changes", filePath: "src/a.ts" };
+			window.dispatchEvent(new CustomEvent("open-panel", { detail }));
+			window.dispatchEvent(new CustomEvent("open-panel-tab", { detail }));
+		});
+	const sessionScope = app.getByRole("button", { name: /^本会话/ });
+	await focusFile();
+	await expect(sessionScope).toHaveAttribute("aria-pressed", "true");
+	await app.getByRole("button", { name: /^未暂存/ }).click();
+	await expect(sessionScope).toHaveAttribute("aria-pressed", "false");
+	await focusFile(); // same path as before
+	await expect(sessionScope).toHaveAttribute("aria-pressed", "true");
+});
+
 test("command palette via Ctrl+K and theme toggle", async ({ app }) => {
 	const dialog = app.getByRole("dialog", { name: "命令面板" });
 	const html = app.locator("html");

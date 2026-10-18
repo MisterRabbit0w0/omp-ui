@@ -43,6 +43,8 @@ import {
 	getAdjacentSessionId,
 	getSessionRowStatus,
 	groupSessionsByCwd,
+	previewGroupSessions,
+	SESSION_GROUP_PREVIEW_LIMIT,
 	stripPrivateUse,
 	type SessionRowStatus,
 } from "./sidebar-utils";
@@ -166,6 +168,7 @@ export function Sidebar({
 	const [query, setQuery] = useState("");
 	const [showArchived, setShowArchived] = useState(false);
 	const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(loadCollapsedGroups);
+	const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 	const [lastSeen, setLastSeen] = useState<Record<string, number>>({});
 	const [fallbackTitles, setFallbackTitles] = useState<Record<string, string>>({});
 	const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -220,6 +223,19 @@ export function Sidebar({
 
 	const groups = useMemo(() => groupSessionsByCwd(filtered), [filtered]);
 
+	// What the list actually shows (short list per workspace unless expanded or searching): Alt+↑/↓ must not land on hidden rows.
+	const visibleGroups = useMemo(
+		() =>
+			groups.map(group => ({
+				...group,
+				sessions: previewGroupSessions(group.sessions, {
+					expanded: query.trim().length > 0 || Boolean(expandedGroups[group.cwd]),
+					currentSessionId,
+				}).sessions,
+			})),
+		[groups, query, expandedGroups, currentSessionId],
+	);
+
 	const handleSelectSession = useCallback(
 		(item: SessionListItem) => {
 			setLastSeen(prev => ({ ...prev, [item.id]: Date.now() }));
@@ -238,7 +254,7 @@ export function Sidebar({
 			if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
 			e.preventDefault();
 			const nextId = getAdjacentSessionId(
-				groups,
+				visibleGroups,
 				collapsedGroups,
 				currentSessionId,
 				e.key === "ArrowUp" ? -1 : 1,
@@ -249,11 +265,20 @@ export function Sidebar({
 		};
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
-	}, [groups, collapsedGroups, currentSessionId, sessions, handleSelectSession, sessionsOverride]);
+	}, [visibleGroups, collapsedGroups, currentSessionId, sessions, handleSelectSession, sessionsOverride]);
 
 	const toggleGroup = (cwd: string) => {
 		setCollapsedGroups(prev => {
 			const next = { ...prev, [cwd]: !prev[cwd] };
+			// Reopening a workspace starts from the default short list again.
+			if (next[cwd]) {
+				setExpandedGroups(expanded => {
+					if (!expanded[cwd]) return expanded;
+					const nextExpanded = { ...expanded };
+					delete nextExpanded[cwd];
+					return nextExpanded;
+				});
+			}
 			try {
 				localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify(next));
 			} catch {
@@ -331,6 +356,8 @@ export function Sidebar({
 			} else {
 				await getBridge().http.archiveSession(item.id);
 				toast("已归档会话", "info");
+				// Archived sessions leave the default list; don't stay parked on the one just archived.
+				if (!showArchived) useAppStore.getState().leaveSession(item.id, { cwd: item.cwd });
 			}
 			await loadSessions();
 		} catch (err) {
@@ -350,9 +377,7 @@ export function Sidebar({
 	const handleConfirmDelete = async (item: SessionListItem) => {
 		try {
 			await getBridge().http.deleteSession(item.id);
-			if (currentSessionId === item.id) {
-				useAppStore.setState({ currentSessionId: null });
-			}
+			useAppStore.getState().leaveSession(item.id, { cwd: item.cwd, drop: true });
 			await loadSessions();
 			toast("会话已移入回收站", "info");
 		} catch (err) {
@@ -475,6 +500,14 @@ export function Sidebar({
 				{hl.highlightBlock}
 				{groups.map(group => {
 					const collapsed = Boolean(collapsedGroups[group.cwd]);
+					const searching = query.trim().length > 0;
+					const expanded = searching || Boolean(expandedGroups[group.cwd]);
+					const preview = previewGroupSessions(group.sessions, {
+						expanded,
+						currentSessionId,
+					});
+					const showToggle =
+						!searching && group.sessions.length > SESSION_GROUP_PREVIEW_LIMIT;
 					return (
 						<div key={group.cwd}>
 							<div
@@ -516,7 +549,7 @@ export function Sidebar({
 
 							<div className={"grid-collapse " + (collapsed ? "" : "open")}>
 								<div>
-									{group.sessions.map(item => {
+									{preview.sessions.map(item => {
 										const isCurrent = item.id === currentSessionId;
 										const view = views[item.id];
 										const status = getSessionRowStatus(
@@ -636,6 +669,22 @@ export function Sidebar({
 											</ContextMenu>
 										);
 									})}
+									{showToggle && (
+										<button
+											type="button"
+											onClick={() =>
+												setExpandedGroups(prev => ({
+													...prev,
+													[group.cwd]: !prev[group.cwd],
+												}))
+											}
+											className="mt-0.5 flex h-7 w-full items-center rounded-[7px] px-2 text-left text-[12px] text-ink-2 transition-colors hover:bg-hover-2 hover:text-ink"
+										>
+											{expanded
+												? "收起"
+												: `展开显示更多${preview.hiddenCount > 0 ? `（还有 ${preview.hiddenCount} 条）` : ""}`}
+										</button>
+									)}
 								</div>
 							</div>
 						</div>

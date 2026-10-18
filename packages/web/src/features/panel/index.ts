@@ -2,7 +2,7 @@ export { SidePanel, type OpenPanelEventDetail, type SidePanelProps } from "./Sid
 export { PanelOverlays, type PanelOverlaysProps } from "./PanelOverlays";
 export { TodoTab, type TodoTabProps } from "./TodoTab";
 export { SubagentsTab, type SubagentsTabProps } from "./SubagentsTab";
-export { ChangesTab, type ChangesTabProps } from "./ChangesTab";
+export { ChangesTab, type ChangesTabProps, type FileFocusRequest } from "./ChangesTab";
 export { GoalTab, type GoalTabProps } from "./GoalTab";
 export { InfoTab, type InfoTabProps } from "./InfoTab";
 export {
@@ -23,6 +23,7 @@ export {
 	removeTodoTask,
 	SCROLL_TO_TOOL_EVENT,
 	scrollToToolCall,
+	selectLatestTurnChangedFiles,
 	splitFilePath,
 	toggleTodoTask,
 	type DiffLineItem,

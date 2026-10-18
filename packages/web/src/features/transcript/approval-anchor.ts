@@ -20,7 +20,7 @@ export interface AnchoredApprovals {
 	unanchored: ApprovalPrompt[];
 }
 
-interface CandidateToolCall {
+export interface CandidateToolCall {
 	id: string;
 	name: string;
 	isRunningExec: boolean;
@@ -31,7 +31,7 @@ interface CandidateToolCall {
 /**
  * Collect candidate tool calls in chronological order from `selectTurns(view)` and `toolExec`.
  */
-function collectCandidateToolCalls(
+export function collectCandidateToolCalls(
 	turns: ReadonlyArray<TranscriptItem>,
 	toolExec: Map<string, ToolExec>,
 ): CandidateToolCall[] {

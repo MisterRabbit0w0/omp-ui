@@ -58,6 +58,8 @@ export function nextConnectionBannerState(
 
 /**
  * DESIGN §12: count sessions needing user attention (pending UI requests, errors, or unread settled runs).
+ * `pageHidden` means the user is away (tab hidden or window unfocused). The open session is skipped while
+ * the user is looking at it: its approval card / banner / result is already in front of them.
  */
 export function countAttentionSessions(
 	views: Record<string, SessionView>,
@@ -69,14 +71,13 @@ export function countAttentionSessions(
 	const ids = new Set<string>([...Object.keys(views), ...Object.keys(attention)]);
 	let count = 0;
 	for (const id of ids) {
+		if (id === currentSessionId && !pageHidden) continue;
 		const view = views[id];
 		const hasPendingUi = (view?.pendingUi.length ?? 0) > 0;
 		const hasError =
 			(view?.run.kind === "dead" && view.run.crashed) ||
 			(view?.banners.some(b => b.kind === "prompt-error" || b.kind === "retry-failed" || b.kind === "compaction-error") ?? false);
-		const settledAt = attention[id] ?? 0;
-		const seenAt = lastSeen[id] ?? 0;
-		const hasUnreadSettled = settledAt > seenAt && (pageHidden || id !== currentSessionId);
+		const hasUnreadSettled = (attention[id] ?? 0) > (lastSeen[id] ?? 0);
 		if (hasPendingUi || hasError || hasUnreadSettled) {
 			count += 1;
 		}

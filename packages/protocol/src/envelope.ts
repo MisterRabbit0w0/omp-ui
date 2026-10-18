@@ -21,6 +21,8 @@ export type C2B =
 	| { t: "hello"; token: string }
 	| { t: "attach"; sessionId: string; sinceSeq?: number }
 	| { t: "detach"; sessionId: string }
+	/** The session this tab shows (null = none). Pins its process in the pool; others may be released when idle. */
+	| { t: "focus"; sessionId: string | null }
 	| {
 			t: "start";
 			reqId: string;
@@ -49,7 +51,8 @@ export type B2C =
 	| { t: "frame"; sessionId: string; seq: number; frame: RpcServerFrame }
 	| { t: "resync"; sessionId: string }
 	| { t: "ui_resolved"; sessionId: string; id: string; auto?: boolean }
-	| { t: "proc"; sessionId: string; state: ProcState; code?: number; stderrTail?: string }
+	/** `reason: "released"`: the pool stopped an idle process to free resources (not an error; restart on demand). */
+	| { t: "proc"; sessionId: string; state: ProcState; reason?: "released"; code?: number; stderrTail?: string }
 	| { t: "sessions_changed" }
 	| { t: "error"; reqId?: string; message: string };
 

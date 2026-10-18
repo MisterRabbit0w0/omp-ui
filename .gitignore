@@ -15,6 +15,7 @@ e2e/smoke-results/
 
 # local agent/harness state
 .omp/
+.qoder-credits/
 
 # OS
 .DS_Store

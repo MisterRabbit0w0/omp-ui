@@ -7,13 +7,14 @@
  * - Listens to `scroll-to-tool` (`CustomEvent<{ toolCallId: string }>`) on `window` to scroll to and
  *   expand a specific tool call from the right panel's 变更 tab.
  */
-import type { AskUiRequest, FileMentionItem, OpenUrlUiRequest, UserMessage } from "@omp-ui/protocol";
+import type { FileMentionItem, OpenUrlUiRequest, UserMessage } from "@omp-ui/protocol";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionView } from "../../store/hooks";
 import { approvalReceiptKind, askSummaryLines, selectTurns, type SessionView, type TranscriptItem } from "../../store/session-reducer";
 import { anchorApprovals } from "./approval-anchor";
+import { anchorAsks } from "./ask-anchor";
 import { ApprovalCard, ApprovalReceipt } from "./ApprovalCard";
 import { AskCard, AskSummary } from "./AskCard";
 import { AssistantTurnView, DraftTurnView, StandaloneMessageView } from "./AssistantTurnView";
@@ -222,14 +223,23 @@ export function Transcript({
 		[view, rawTurns],
 	);
 
-	const askRequests = useMemo<AskUiRequest[]>(
-		() => (view ? view.pendingUi.filter((r): r is AskUiRequest => r.method === "ask") : []),
-		[view],
+	const anchoredAsks = useMemo(
+		() =>
+			view
+				? anchorAsks(rawTurns, view.pendingUi, view.answeredUi, view.toolExec)
+				: { byToolCallId: new Map(), unanchored: [] },
+		[view, rawTurns],
 	);
 
-	const answeredAsks = useMemo(
-		() => (view ? view.answeredUi.filter(a => a.request.method === "ask") : []),
-		[view],
+	// Requests that have no ask tool row to sit under keep the old tail fallback.
+	const unanchoredAskRequests = useMemo(
+		() => anchoredAsks.unanchored.filter(a => !a.entry).map(a => a.request),
+		[anchoredAsks],
+	);
+
+	const unanchoredAnsweredAsks = useMemo(
+		() => anchoredAsks.unanchored.flatMap(a => (a.entry ? [a.entry] : [])),
+		[anchoredAsks],
 	);
 
 	const unanchoredReceipts = useMemo(
@@ -452,6 +462,7 @@ export function Transcript({
 						toolExec={view.toolExec}
 						subagents={view.subagents}
 						anchoredApprovals={anchored.byToolCallId}
+						anchoredAsks={anchoredAsks.byToolCallId}
 						isTurnRunning={turnRunning}
 						animateOnMount={row.animateOnMount}
 						focusedToolCallId={focusedToolCallId}
@@ -468,6 +479,7 @@ export function Transcript({
 						toolExec={view.toolExec}
 						subagents={view.subagents}
 						anchoredApprovals={anchored.byToolCallId}
+						anchoredAsks={anchoredAsks.byToolCallId}
 						focusedToolCallId={focusedToolCallId}
 					/>
 				</div>
@@ -547,12 +559,12 @@ export function Transcript({
 					))}
 
 					{/* Answered asks stay as a compact receipt for the session's lifetime (§6.8) */}
-					{answeredAsks.map(a => (
+					{unanchoredAnsweredAsks.map(a => (
 						<AskSummary key={a.request.id} lines={askSummaryLines(a)} />
 					))}
 
 					{/* Inline AskCard requests */}
-					{askRequests.map(req => (
+					{unanchoredAskRequests.map(req => (
 						<AskCard key={req.id} sessionId={view.sessionId} request={req} />
 					))}
 

@@ -13,16 +13,18 @@ import type {
 	C2B,
 	Diagnostics,
 	ExtensionUiRequest,
+	GitBranchesResult,
 	RpcServerFrame,
 	UiConfig,
 } from "@omp-ui/protocol";
 import { DEFAULT_PORT, WS_PATH } from "@omp-ui/protocol";
 import { ConfigStore } from "./config";
 import { FileAccessError, readSessionFile, searchFiles } from "./files";
+import { gitWorktreeRoot, listGitBranches, readGitChanges, switchGitBranch } from "./git";
 import { ModelCatalog } from "./models";
 import { ProcessPool } from "./pool";
 import { OmpProcess, resolveOmpCommand } from "./process";
-import { SessionScanner } from "./sessions";
+import { defaultAgentDir, SessionScanner } from "./sessions";
 
 const HELLO_TIMEOUT_MS = 5_000;
 const PORT_ATTEMPTS = 20;
@@ -58,7 +60,14 @@ export interface BridgeOptions {
 	webDist?: string;
 	agentDir?: string;
 	configDir?: string;
+	/** Soft cap of the process pool (idle processes beyond it are released). */
 	poolMax?: number;
+	/** Hard cap of the process pool; default sized from free memory / CPUs (§3.1). */
+	poolHardMax?: number;
+	/** Release unviewed idle processes after this long; `0` disables. */
+	poolIdleTtlMs?: number;
+	/** How often the idle reaper runs. */
+	poolReapIntervalMs?: number;
 	/** Test seam: per-process frame ring cap. */
 	ringMaxFrames?: number;
 }
@@ -79,6 +88,8 @@ export interface BridgeHandle {
 interface WsData {
 	authed: boolean;
 	attached: Set<string>;
+	/** Session this tab currently shows (`focus`); pins its process in the pool. */
+	focused?: string | null;
 	helloTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -105,12 +116,49 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const ompCommand = options.ompCommand ?? resolveOmpCommand();
 	const config = new ConfigStore(options.configDir);
 	await config.purgeTrash();
-	const modelCatalog = new ModelCatalog(ompCommand);
-	const pool = new ProcessPool<OmpProcess>(options.poolMax);
+	const modelCatalog = new ModelCatalog(ompCommand, options.agentDir ?? defaultAgentDir());
+	/** Processes the pool released for being idle; their exit is announced as `released`, not as a crash/exit. */
+	const releasedProcs = new WeakSet<OmpProcess>();
+	const pool: ProcessPool<OmpProcess> = new ProcessPool<OmpProcess>({
+		...(options.poolMax !== undefined ? { softMax: options.poolMax } : {}),
+		...(options.poolHardMax !== undefined ? { hardMax: options.poolHardMax } : {}),
+		...(options.poolIdleTtlMs !== undefined ? { idleTtlMs: options.poolIdleTtlMs } : {}),
+		isPinned: key => {
+			for (const ws of clients) if (ws.data.focused === key) return true;
+			return false;
+		},
+		onEvict: (_key, proc) => releasedProcs.add(proc),
+	});
+	const reapTimer = setInterval(() => void pool.reapIdle(), options.poolReapIntervalMs ?? 30_000);
+	reapTimer.unref?.();
+
+	/**
+	 * True when a live process mid-run works inside the git work tree containing `dir` (any subdirectory of it,
+	 * or a parent directory that contains it): a branch switch would rewrite files underneath that agent.
+	 * Outside a repository the directory itself is the unit.
+	 */
+	const runningInWorktree = async (dir: string): Promise<boolean> => {
+		const root = (await gitWorktreeRoot(dir)) ?? dir;
+		const inside = (child: string, parent: string): boolean => {
+			const rel = path.relative(parent, child);
+			return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+		};
+		for (const key of pool.keys()) {
+			const proc = pool.peek(key);
+			// Background subagents edit the work tree too.
+			if (!proc || (proc.settled && proc.runningSubagents.size === 0)) continue;
+			const procDir = await fs.promises.realpath(proc.options.cwd).catch(() => proc.options.cwd);
+			if (inside(procDir, root) || inside(root, procDir)) return true;
+		}
+		return false;
+	};
+	/** Sessions whose DELETE is in flight: no process may be (re)started for them meanwhile. */
+	const deleting = new Set<string>();
+	const deletingFiles = new Set<string>();
 	const scanner = new SessionScanner({
 		...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
 		isLive: id => pool.has(id),
-		isRunning: id => pool.get(id)?.settled === false,
+		isRunning: id => pool.peek(id)?.busy === true,
 		isArchived: id => config.config.archived.includes(id),
 	});
 	const webDist = options.webDist ?? path.resolve(import.meta.dir, "../../web/dist");
@@ -149,6 +197,21 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const spawnSession = async (
 		msg: Extract<C2B, { t: "start" }>,
 	): Promise<{ key: string; proc: OmpProcess }> => {
+		if (msg.resume !== undefined && deletingFiles.has(path.resolve(msg.cwd, msg.resume))) {
+			throw new Error("session is being deleted");
+		}
+		// Admission against the hard cap (may release idle processes); throws when every slot is busy.
+		const releaseSlot = await pool.reserve();
+		try {
+			return await spawnReserved(msg);
+		} finally {
+			releaseSlot();
+		}
+	};
+
+	const spawnReserved = async (
+		msg: Extract<C2B, { t: "start" }>,
+	): Promise<{ key: string; proc: OmpProcess }> => {
 		let key: string | null = null;
 		const proc = new OmpProcess(
 			{
@@ -167,7 +230,16 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					pool.touch(key);
 					broadcastToSession(key, { t: "frame", sessionId: key, seq, frame });
 					// Run start/end flips `running` in the session list; tabs not attached to this session need it.
-					if (frame.type === "agent_start" || frame.type === "session_settled") broadcast({ t: "sessions_changed" });
+					const subagentEnded = frame.type === "subagent_lifecycle" && frame.payload.status !== "started";
+					if (
+						frame.type === "agent_start" ||
+						frame.type === "session_settled" ||
+						(frame.type === "subagent_lifecycle" && (frame.payload.status === "started" || proc.runningSubagents.size === 0))
+					) {
+						broadcast({ t: "sessions_changed" });
+					}
+					// A run (or the last background subagent) that ended may leave the pool over its soft cap.
+					if (frame.type === "session_settled" || subagentEnded) queueMicrotask(() => void pool.rebalance());
 				},
 				onUiResolved: (id, auto) => {
 					if (key === null) return;
@@ -186,20 +258,28 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					// `stop` and superseded since (pool entry now belongs to another process). Never announce its exit.
 					if (terminal && (replacedProcs.has(proc) || (current !== undefined && current !== proc))) return;
 					protocolVersion = proc.protocolVersion;
+					const released = terminal && releasedProcs.has(proc);
 					broadcast({
 						t: "proc",
 						sessionId: key,
 						state,
-						...(code !== undefined ? { code } : {}),
-						...(stderrTail !== undefined ? { stderrTail } : {}),
+						...(released ? { reason: "released" as const } : {}),
+						...(code !== undefined && !released ? { code } : {}),
+						...(stderrTail !== undefined && !released ? { stderrTail } : {}),
 					});
 					if (terminal && current === proc) {
 						void pool.remove(key);
 					}
+					// The sidebar's live dot goes away with it.
+					if (released) broadcast({ t: "sessions_changed" });
 				},
 			},
 		);
 		await proc.start();
+		if (proc.sessionId !== null && deleting.has(proc.sessionId)) {
+			await proc.stop();
+			throw new Error("session is being deleted");
+		}
 		key = proc.sessionId ?? `proc-${crypto.randomUUID()}`;
 		const previous = pool.get(key);
 		if (previous !== undefined) replacedProcs.add(previous);
@@ -252,6 +332,14 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			case "detach":
 				ws.data.attached.delete(msg.sessionId);
 				return;
+			case "focus": {
+				const previous = ws.data.focused ?? null;
+				ws.data.focused = msg.sessionId;
+				if (msg.sessionId !== null) pool.touch(msg.sessionId);
+				// The previously viewed process lost its pin: release it if the pool is over its soft cap.
+				if (previous !== null && previous !== msg.sessionId) void pool.rebalance(msg.sessionId ?? undefined);
+				return;
+			}
 			case "start": {
 				try {
 					const { key } = await spawnSession(msg);
@@ -277,6 +365,10 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				const proc = pool.get(msg.sessionId);
 				if (!proc) {
 					send(ws, { t: "error", reqId: msg.reqId, message: `no live process for session ${msg.sessionId}` });
+					return;
+				}
+				if (deleting.has(msg.sessionId)) {
+					send(ws, { t: "error", reqId: msg.reqId, message: `session ${msg.sessionId} is being deleted` });
 					return;
 				}
 				const response = await proc.send(msg.cmd);
@@ -371,11 +463,29 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				return json(config.config);
 			}
 			if (req.method === "DELETE" && segments.length === 3) {
-				if (pool.has(id)) return errorJson(409, "session is live; stop it before deleting");
-				const file = await scanner.findFile(id);
-				if (!file) return errorJson(404, `unknown session: ${id}`);
-				const target = await config.moveToTrash(file);
-				return json({ trashed: target });
+				// Only a running session is protected (DESIGN §3.6); an idle open one is stopped first so its file is released.
+				const live = pool.get(id);
+				if (live !== undefined && (live.settled === false || live.runningSubagents.size > 0)) return errorJson(409, "session is running; stop it before deleting");
+				if (deleting.has(id)) return errorJson(409, "session is already being deleted");
+				// Atomic with run admission: from here until the file is moved, `rpc` to this session is refused and no
+				// process may be started for it, so a prompt from another tab can't slip in during the awaits below.
+				deleting.add(id);
+				let file: string | undefined;
+				try {
+					file = await scanner.findFile(id);
+					if (!file) return errorJson(404, `unknown session: ${id}`);
+					deletingFiles.add(path.resolve(file));
+					const current = pool.get(id);
+					if (current !== undefined && (current.settled === false || current.runningSubagents.size > 0)) {
+						return errorJson(409, "session is running; stop it before deleting");
+					}
+					if (current !== undefined) await pool.remove(id);
+					const target = await config.moveToTrash(file);
+					return json({ trashed: target });
+				} finally {
+					deleting.delete(id);
+					if (file) deletingFiles.delete(path.resolve(file));
+				}
 			}
 		}
 		if (req.method === "GET" && url.pathname === "/api/models") {
@@ -390,6 +500,48 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			const cwd = url.searchParams.get("cwd") ?? "";
 			if (cwd.length === 0) return errorJson(400, "cwd is required");
 			return json(await searchFiles(cwd, url.searchParams.get("q") ?? ""));
+		}
+		if (url.pathname.startsWith("/api/git/")) {
+			// One validation for every git endpoint: an existing absolute directory, canonicalized. Same trust
+			// model as /api/files (token-gated, any local workspace), so a freshly picked project without
+			// session files works too.
+			const body =
+				req.method === "POST" ? ((await req.json().catch(() => null)) as { cwd?: unknown; branch?: unknown } | null) : null;
+			const rawCwd = req.method === "POST" ? (typeof body?.cwd === "string" ? body.cwd : "") : (url.searchParams.get("cwd") ?? "");
+			if (rawCwd.length === 0) return errorJson(400, "cwd is required");
+			const workspace = await resolveWorkspaceDir(rawCwd);
+			if (!workspace.ok) {
+				// The branch picker probes every session's cwd; a deleted project is simply "not a repo".
+				if (workspace.status === 404 && req.method === "GET" && url.pathname === "/api/git/branches") {
+					return json({ repo: false, current: null, branches: [] } satisfies GitBranchesResult);
+				}
+				return errorJson(workspace.status, workspace.error);
+			}
+			const cwd = workspace.dir;
+
+			if (req.method === "GET" && url.pathname === "/api/git/changes") {
+				const scope = url.searchParams.get("scope") === "staged" ? "staged" : "unstaged";
+				try {
+					return json(await readGitChanges(cwd, scope));
+				} catch (error) {
+					return errorJson(502, (error as Error).message);
+				}
+			}
+			if (req.method === "GET" && url.pathname === "/api/git/branches") {
+				return json(await listGitBranches(cwd));
+			}
+			if (req.method === "POST" && url.pathname === "/api/git/switch") {
+				const branch = typeof body?.branch === "string" ? body.branch : "";
+				if (branch.length === 0) return errorJson(400, "cwd and branch are required");
+				// Writes to the working tree: never under a running agent (it would edit files mid-switch).
+				if (await runningInWorktree(cwd)) {
+					return errorJson(409, "a session in this workspace is running; wait for it to finish");
+				}
+				const result = await switchGitBranch(cwd, branch);
+				if (!result.ok) return errorJson(result.status, result.error);
+				return json(await listGitBranches(cwd));
+			}
+			return errorJson(404, "not found");
 		}
 		if (req.method === "GET" && url.pathname === "/api/file") {
 			const cwd = url.searchParams.get("cwd") ?? "";
@@ -554,6 +706,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				close(ws) {
 					clearTimeout(ws.data.helloTimer);
 					clients.delete(ws);
+					if (ws.data.focused) void pool.rebalance();
 				},
 			},
 		});
@@ -594,6 +747,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 		config,
 		async close() {
 			unwatch();
+			clearInterval(reapTimer);
 			scanner.close();
 			for (const ws of [...clients]) {
 				try {
@@ -606,4 +760,18 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			await pool.stopAll();
 		},
 	};
+}
+
+type WorkspaceDir = { ok: true; dir: string } | { ok: false; status: 400 | 404; error: string };
+
+/** Canonical absolute directory for a git endpoint, or the HTTP error to return. */
+export async function resolveWorkspaceDir(raw: string): Promise<WorkspaceDir> {
+	if (!path.isAbsolute(raw)) return { ok: false, status: 400, error: "cwd must be an absolute path" };
+	try {
+		const dir = await fs.promises.realpath(raw);
+		if (!(await fs.promises.stat(dir)).isDirectory()) return { ok: false, status: 400, error: "cwd is not a directory" };
+		return { ok: true, dir };
+	} catch {
+		return { ok: false, status: 404, error: `no such directory: ${raw}` };
+	}
 }

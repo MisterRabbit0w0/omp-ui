@@ -1,6 +1,6 @@
 import type { Goal, TodoItem, TodoPhase, ToolCall, ToolResultMessage } from "@omp-ui/protocol";
 import { formatCompactTokens } from "@/features/subagents/subagent-utils";
-import { selectChangedFiles, type ChangedFile, type SessionView } from "@/store/session-reducer";
+import { selectChangedFiles, selectTurns, type ChangedFile, type SessionView } from "@/store/session-reducer";
 
 export type PanelTabId = "todo" | "subagents" | "changes" | "goal" | "info";
 
@@ -296,6 +296,9 @@ export interface GroupedChangedFile {
 	mergedDiff: string;
 	oldText?: string;
 	newText?: string;
+	/** Git scopes only: M/A/D/R/C or "?" for untracked. */
+	status?: string;
+	binary?: boolean;
 }
 
 export function splitFilePath(fullPath: string): { dir: string; base: string } {
@@ -511,10 +514,37 @@ function extractCallDiffSnippet(
 	return { diff: "", added: 0, removed: 0 };
 }
 
-/** Group `selectChangedFiles(view)` by file path and build merged diffs (§6.16). */
-export function groupChangedFiles(view: SessionView | undefined): GroupedChangedFile[] {
+/** Changed files touched by the most recent turn/draft that edited anything ("最近一轮"). */
+export function selectLatestTurnChangedFiles(view: SessionView | undefined): ChangedFile[] {
 	if (!view) return [];
 	const changed = selectChangedFiles(view);
+	if (changed.length === 0) return [];
+	const items = selectTurns(view);
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]!;
+		const ids = new Set<string>();
+		if (item.kind === "turn") {
+			for (const tool of item.turn.tools) ids.add(tool.call.id);
+		} else if (item.kind === "draft") {
+			for (const block of item.draft.content) {
+				if (block?.type === "toolCall" && block.id) ids.add(block.id);
+			}
+		} else {
+			continue;
+		}
+		const subset = changed.filter(entry => ids.has(entry.toolCallId));
+		if (subset.length > 0) return subset;
+	}
+	return [];
+}
+
+/** Group `selectChangedFiles(view)` by file path and build merged diffs (§6.16). */
+export function groupChangedFiles(
+	view: SessionView | undefined,
+	changedOverride?: readonly ChangedFile[],
+): GroupedChangedFile[] {
+	if (!view) return [];
+	const changed = changedOverride ?? selectChangedFiles(view);
 	if (changed.length === 0) return [];
 
 	const callsById = new Map<string, ToolCall>();

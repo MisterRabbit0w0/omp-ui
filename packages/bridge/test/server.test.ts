@@ -423,6 +423,45 @@ describe("http api", () => {
 		ws.close();
 	});
 
+	test("/api/git/changes reports a non-repo cwd without failing the request", async () => {
+		const res = await api(`/api/git/changes?cwd=${encodeURIComponent(cwd)}&scope=unstaged`);
+		expect(res.status).toBe(200);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ repo: false, scope: "unstaged", files: [] });
+		expect((await api("/api/git/changes")).status).toBe(400);
+	});
+
+	test("git endpoints share one cwd validation and allow a repo with no sessions yet", async () => {
+		expect((await api(`/api/git/branches?cwd=${encodeURIComponent("relative/dir")}`)).status).toBe(400);
+		const missing = path.join(cwd, "does-not-exist");
+		expect((await api(`/api/git/changes?cwd=${encodeURIComponent(missing)}`)).status).toBe(404);
+		const gone = await api(`/api/git/branches?cwd=${encodeURIComponent(missing)}`);
+		expect(gone.status).toBe(200);
+		expect(await gone.json()).toEqual({ repo: false, current: null, branches: [] });
+
+		const repo = path.join(cwd, "fresh-project");
+		fs.mkdirSync(repo, { recursive: true });
+		const git = (...args: string[]) => {
+			const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" });
+			if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+		};
+		git("init");
+		git("config", "user.email", "t@example.test");
+		git("config", "user.name", "t");
+		git("config", "commit.gpgsign", "false");
+		fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+		git("add", "a.txt");
+		git("commit", "-m", "init");
+		git("branch", "feature");
+		const res = await api("/api/git/switch", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ cwd: repo, branch: "feature" }),
+		});
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { current: string }).current).toBe("feature");
+	});
+
 	test("/api/file reads inside cwd and rejects .. traversal with 403", async () => {
 		fs.writeFileSync(path.join(cwd, "ok.txt"), "hello");
 		const ok = await api(`/api/file?cwd=${encodeURIComponent(cwd)}&path=ok.txt`);
@@ -436,6 +475,82 @@ describe("http api", () => {
 			`/api/file?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(`../${path.basename(outside)}/secret.txt`)}`,
 		);
 		expect(bad.status).toBe(403);
+	});
+
+	test("branch switch is refused while a session runs anywhere in the same worktree", async () => {
+		const repo = path.join(cwd, "mono");
+		const pkg = path.join(repo, "pkg-a");
+		fs.mkdirSync(pkg, { recursive: true });
+		const git = (...args: string[]) => {
+			const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" });
+			if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+		};
+		git("init");
+		git("config", "user.email", "t@example.test");
+		git("config", "user.name", "t");
+		git("config", "commit.gpgsign", "false");
+		fs.writeFileSync(path.join(pkg, "a.txt"), "a\n");
+		git("add", "-A");
+		git("commit", "-m", "init");
+		git("branch", "feature");
+
+		const ws = await connectAuthed();
+		ws.send({ t: "start", reqId: "wt-start", cwd: pkg });
+		const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === "wt-start");
+		if (started.t !== "started") throw new Error("unexpected");
+		const id = started.sessionId;
+		ws.send({ t: "attach", sessionId: id, sinceSeq: 0 });
+		ws.send({ t: "rpc", reqId: "wt-run", sessionId: id, cmd: { type: "prompt", message: "hold" } });
+		const request = await ws.waitMessage(
+			msg => msg.t === "frame" && msg.frame.type === "extension_ui_request" && msg.frame.method === "select",
+		);
+		const switchFrom = (dir: string) =>
+			api("/api/git/switch", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: dir, branch: "feature" }),
+			});
+		// The agent runs in pkg-a; the request comes from the repo root (a different cwd, same worktree).
+		expect((await switchFrom(repo)).status).toBe(409);
+		if (request.t === "frame" && request.frame.type === "extension_ui_request") {
+			ws.send({ t: "ui_response", sessionId: id, frame: { type: "extension_ui_response", id: request.frame.id, value: "Approve" } });
+		}
+		await ws.waitMessage(msg => msg.t === "frame" && msg.frame.type === "session_settled");
+		expect((await switchFrom(repo)).status).toBe(200);
+		await bridge.pool.remove(id);
+		ws.close();
+	});
+
+	test("deleting an idle open session refuses prompts while it is in flight", async () => {
+		const ws = await connectAuthed();
+		const id = await startSession(ws, "del-race");
+		ws.send({ t: "attach", sessionId: id, sinceSeq: 0 });
+		const file = path.join(tempDir("del-race"), `${id}.jsonl`);
+		fs.writeFileSync(file, "{}\n");
+		const original = bridge.scanner.findFile.bind(bridge.scanner);
+		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		bridge.scanner.findFile = async (sessionId: string) => {
+			if (sessionId !== id) return original(sessionId);
+			entered.resolve();
+			await gate.promise;
+			return file;
+		};
+		try {
+			const del = api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+			await entered.promise;
+			// Another tab sends a prompt while the bridge is still locating the file.
+			ws.send({ t: "rpc", reqId: "del-race-run", sessionId: id, cmd: { type: "prompt", message: "late" } });
+			const refused = await ws.waitMessage(msg => msg.t === "error" && msg.reqId === "del-race-run");
+			expect(refused.t === "error" && refused.message).toContain("being deleted");
+			gate.resolve();
+			expect((await del).status).toBe(200);
+			expect(bridge.pool.has(id)).toBe(false);
+			expect(fs.existsSync(file)).toBe(false);
+		} finally {
+			bridge.scanner.findFile = original;
+			ws.close();
+		}
 	});
 
 	test("sessions list, transcript, archive, and trash delete (refusing live)", async () => {
@@ -473,8 +588,24 @@ describe("http api", () => {
 
 		const ws = await connectAuthed();
 		const liveId = await startSession(ws, "r10");
-		const liveDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
-		expect(liveDel.status).toBe(409);
+
+		// Idle open session without a file on disk: unknown to the scanner, and the process is left alone.
+		const idleDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
+		expect(idleDel.status).toBe(404);
+		expect(bridge.pool.has(liveId)).toBe(true);
+
+		// Running session (parked on the approval prompt): refused with 409.
+		ws.send({ t: "attach", sessionId: liveId, sinceSeq: 0 });
+		ws.send({ t: "rpc", reqId: "r10-run", sessionId: liveId, cmd: { type: "prompt", message: "hold" } });
+		const request = await ws.waitMessage(
+			msg => msg.t === "frame" && msg.frame.type === "extension_ui_request" && msg.frame.method === "select",
+		);
+		const runningDel = await api(`/api/sessions/${encodeURIComponent(liveId)}`, { method: "DELETE" });
+		expect(runningDel.status).toBe(409);
+		if (request.t === "frame" && request.frame.type === "extension_ui_request") {
+			ws.send({ t: "ui_response", sessionId: liveId, frame: { type: "extension_ui_response", id: request.frame.id, value: "Approve" } });
+		}
+		await ws.waitMessage(msg => msg.t === "frame" && msg.frame.type === "session_settled");
 		ws.close();
 
 		const del = await api("/api/sessions/sess-1", { method: "DELETE" });
@@ -496,6 +627,110 @@ describe("GET /api/models", () => {
 			expect(unauth.status).toBe(401);
 		} finally {
 			await bridge.close();
+		}
+	});
+});
+
+describe("elastic pool release", () => {
+	test("idle unviewed processes are released as `released` (no exit code); the viewed one stays pinned", async () => {
+		const previousRich = process.env.FAKE_OMP_RICH;
+		process.env.FAKE_OMP_RICH = "1"; // distinct session ids per start
+		const own = await createBridge({
+			port: 0,
+			token: TOKEN,
+			ompCommand: FAKE_OMP_COMMAND,
+			ompVersion: "18.11.1",
+			agentDir: tempDir("pool-agent"),
+			configDir: tempDir("pool-config"),
+			poolMax: 1,
+			poolHardMax: 4,
+		});
+		try {
+			const ws = TestWs.connect(`ws://127.0.0.1:${own.port}/ws`);
+			await ws.ready();
+			ws.hello(TOKEN);
+			await ws.waitMessage(msg => msg.t === "welcome");
+			const start = async (reqId: string): Promise<string> => {
+				ws.send({ t: "start", reqId, cwd });
+				const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === reqId);
+				if (started.t !== "started") throw new Error("unexpected");
+				return started.sessionId;
+			};
+			const released = (id: string) => (msg: B2C) => msg.t === "proc" && msg.sessionId === id && msg.reason === "released";
+
+			const a = await start("p1");
+			const b = await start("p2"); // over the soft cap: a is idle and unviewed
+			const notice = await ws.waitMessage(released(a));
+			expect(notice.t === "proc" && notice.code).toBeFalsy();
+			expect(own.pool.keys()).toEqual([b]);
+
+			ws.send({ t: "focus", sessionId: b });
+			const c = await start("p3"); // b is pinned: the pool grows instead of releasing it
+			await Bun.sleep(50);
+			expect(own.pool.keys().sort()).toEqual([b, c].sort());
+			expect(ws.messages.some(released(b))).toBe(false);
+
+			ws.send({ t: "focus", sessionId: c }); // b lost its pin: back down to the soft cap
+			await ws.waitMessage(released(b));
+			expect(own.pool.keys()).toEqual([c]);
+			ws.close();
+		} finally {
+			if (previousRich === undefined) delete process.env.FAKE_OMP_RICH;
+			else process.env.FAKE_OMP_RICH = previousRich;
+			await own.close();
+		}
+	});
+});
+
+describe("background subagents keep their process", () => {
+	test("a settled session with running subagents is neither released nor reported idle until they end", async () => {
+		const previousId = process.env.FAKE_OMP_SESSION_ID;
+		const own = await createBridge({
+			port: 0,
+			token: TOKEN,
+			ompCommand: FAKE_OMP_COMMAND,
+			ompVersion: "18.11.1",
+			agentDir: tempDir("bg-agent"),
+			configDir: tempDir("bg-config"),
+			poolMax: 1,
+			poolHardMax: 4,
+		});
+		try {
+			const ws = TestWs.connect(`ws://127.0.0.1:${own.port}/ws`);
+			await ws.ready();
+			ws.hello(TOKEN);
+			await ws.waitMessage(msg => msg.t === "welcome");
+			const start = async (id: string, reqId: string): Promise<string> => {
+				process.env.FAKE_OMP_SESSION_ID = id;
+				ws.send({ t: "start", reqId, cwd });
+				const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === reqId);
+				if (started.t !== "started") throw new Error("unexpected");
+				return started.sessionId;
+			};
+			const a = await start("bg-a", "b1");
+			ws.send({ t: "attach", sessionId: a });
+			await runPrompt(ws, a, "b2", "BGSUB work");
+			await ws.waitMessage(msg => msg.t === "frame" && msg.sessionId === a && msg.frame.type === "session_settled");
+			const proc = own.pool.peek(a)!;
+			expect(proc.settled).toBe(true);
+			expect([...proc.runningSubagents].sort()).toEqual(["Bg", "Bg.Child"]);
+			expect(proc.busy).toBe(true);
+
+			const b = await start("bg-b", "b3"); // over the soft cap, but a's background work must survive
+			ws.send({ t: "focus", sessionId: b }); // the user moved on to b
+			await Bun.sleep(50);
+			expect(own.pool.has(a)).toBe(true);
+			const released = (msg: B2C) => msg.t === "proc" && msg.sessionId === a && msg.reason === "released";
+			expect(ws.messages.some(released)).toBe(false);
+
+			ws.send({ t: "rpc", reqId: "b4", sessionId: a, cmd: { type: "cancel_subagent", subagentId: "Bg" } });
+			await ws.waitMessage(released); // the last subagent ended: back down to the soft cap
+			expect(own.pool.has(a)).toBe(false);
+			ws.close();
+		} finally {
+			if (previousId === undefined) delete process.env.FAKE_OMP_SESSION_ID;
+			else process.env.FAKE_OMP_SESSION_ID = previousId;
+			await own.close();
 		}
 	});
 });

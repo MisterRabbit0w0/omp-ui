@@ -11,7 +11,10 @@ import type {
 } from "@omp-ui/protocol";
 import {
 	createSessionView,
+	hasRunningSubagents,
+	mergeSubagentSnapshots,
 	reduce,
+	reduceProc,
 	reducePromptAck,
 	resolveUi,
 	selectChangedFiles,
@@ -410,5 +413,60 @@ describe("selectChangedFiles", () => {
 		const files = selectChangedFiles(view);
 		expect(files.map(f => f.path)).toEqual(["C:\\w\\a.ts", "C:\\w\\x.ts", "C:\\w\\y.ts", "C:\\w\\rel\\c.ts"]);
 		expect(files[2]).toMatchObject({ toolCallId: "e2", additions: 2 });
+	});
+});
+
+describe("subagents (nested / background)", () => {
+	const lifecycle = (id: string, status: "started" | "completed", extra: Record<string, unknown> = {}): RpcServerFrame =>
+		({ type: "subagent_lifecycle", payload: { id, agent: "task", agentSource: "bundled", status, index: 0, ...extra } }) as RpcServerFrame;
+	const progress = (id: string | undefined, index: number, parentToolCallId: string, status = "running"): RpcServerFrame =>
+		({
+			type: "subagent_progress",
+			payload: { index, agent: "task", agentSource: "bundled", task: "t", parentToolCallId, progress: { ...(id ? { id } : {}), status } },
+		}) as RpcServerFrame;
+
+	test("progress is keyed by the subagent id, not the per-call index", () => {
+		const v = reduceAll(createSessionView("s"), [
+			lifecycle("Anna", "started", { parentToolCallId: "c1" }),
+			lifecycle("Anna.Bob", "started", { parentToolCallId: "c2" }),
+			// both are index 0 within their own task call
+			progress("Anna.Bob", 0, "c2"),
+			progress("Anna", 0, "c1", "completed"),
+		]);
+		expect([...v.subagents.keys()].sort()).toEqual(["Anna", "Anna.Bob"]);
+		expect(v.subagents.get("Anna")!.status).toBe("completed");
+		expect(v.subagents.get("Anna.Bob")!.status).toBe("running");
+		expect(v.subagents.get("Anna.Bob")!.parentToolCallId).toBe("c2");
+		expect(hasRunningSubagents(v)).toBe(true);
+	});
+
+	test("progress without an id falls back to (call, index)", () => {
+		const v = reduceAll(createSessionView("s"), [
+			lifecycle("A", "started", { parentToolCallId: "c1" }),
+			progress(undefined, 0, "c1", "completed"),
+		]);
+		expect(v.subagents.size).toBe(1);
+		expect(v.subagents.get("A")!.status).toBe("completed");
+	});
+
+	test("a dead process aborts subagents that were still running", () => {
+		let v = reduceAll(createSessionView("s"), [lifecycle("Bg", "started", { detached: true }), lifecycle("Done", "completed")]);
+		v = reduceProc(v, "exited");
+		expect(v.subagents.get("Bg")!.status).toBe("aborted");
+		expect(v.subagents.get("Done")!.status).toBe("completed");
+		expect(hasRunningSubagents(v)).toBe(false);
+	});
+
+	test("snapshot merge keeps finished ancestors and drops running ones the roster no longer has", () => {
+		const prev = reduceAll(createSessionView("s"), [
+			lifecycle("Anna", "completed"),
+			lifecycle("Gone", "started"),
+			lifecycle("Anna.Bob", "started", { detached: true }),
+		]).subagents;
+		const merged = mergeSubagentSnapshots(prev, [
+			{ id: "Anna.Bob", index: 0, agent: "task", agentSource: "bundled", status: "running", lastUpdate: 5 },
+		] as never);
+		expect([...merged.keys()].sort()).toEqual(["Anna", "Anna.Bob"]);
+		expect(merged.get("Anna.Bob")!.detached).toBe(true);
 	});
 });

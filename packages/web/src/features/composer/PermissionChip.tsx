@@ -19,8 +19,11 @@ export interface PermissionChipProps {
 	context: "welcome" | "session";
 	/** Process is being restarted: the chip shows a 12px spinner and cannot be opened. */
 	restarting?: boolean;
-	/** Run in progress: the menu opens but the rows are disabled with a hint. */
+	/** Shell command running: the menu opens but the rows are disabled with a hint. */
 	locked?: boolean;
+	/** Run in progress: picking is allowed but only takes effect with the next request. */
+	/** Pick is deferred: `true` (request running) or `"subagents"` (background subagents still working). */
+	deferred?: boolean | "subagents";
 	disabled?: boolean;
 	open?: boolean;
 	onOpenChange?: (open: boolean) => void;
@@ -30,12 +33,14 @@ export interface PermissionMenuPanelProps {
 	mode: ApprovalMode;
 	context: "welcome" | "session";
 	locked?: boolean;
+	/** Pick is deferred: `true` (request running) or `"subagents"` (background subagents still working). */
+	deferred?: boolean | "subagents";
 	/** Called with the picked mode (never the current one). */
 	onPick: (mode: ApprovalMode) => void;
 }
 
 /** The three 52px rows plus the footer; rendered inside the chip's popover. */
-export function PermissionMenuPanel({ mode, context, locked = false, onPick }: PermissionMenuPanelProps) {
+export function PermissionMenuPanel({ mode, context, locked = false, deferred = false, onPick }: PermissionMenuPanelProps) {
 	const hl = useSlidingHighlight<HTMLDivElement>({ variant: "menu" });
 	return (
 		<>
@@ -83,10 +88,14 @@ export function PermissionMenuPanel({ mode, context, locked = false, onPick }: P
 			</div>
 			<div className="mt-1 border-t border-line px-2.5 pt-1.5 pb-1 text-[11.5px] text-ink-2">
 				{locked
-					? "运行结束后可切换"
-					: context === "session"
-						? "切换会重启会话进程，历史不受影响"
-						: "作用于这次新建的会话"}
+					? "命令运行结束后可切换"
+					: deferred === "subagents"
+						? "后台子代理仍在运行，切换将在它们结束后的下次请求时生效"
+						: deferred
+							? "当前请求仍在运行，切换将在下次请求时生效"
+						: context === "session"
+							? "切换会重启会话进程，历史不受影响"
+							: "作用于这次新建的会话"}
 			</div>
 		</>
 	);
@@ -102,6 +111,7 @@ export function PermissionChip({
 	context,
 	restarting = false,
 	locked = false,
+	deferred = false,
 	disabled = false,
 	open,
 	onOpenChange,
@@ -136,6 +146,7 @@ export function PermissionChip({
 					mode={mode}
 					context={context}
 					locked={locked}
+					deferred={deferred}
 					onPick={value => {
 						setOpen(false);
 						if (value !== mode) onSelect(value);

@@ -3,7 +3,7 @@
  * `Authorization: Bearer <token>`; errors throw HttpError with the bridge's
  * `{error}` message.
  */
-import type { AgentMessage, CatalogModel, Diagnostics, FileHit, ProjectItem, SessionListItem, UiConfig } from "@omp-ui/protocol";
+import type { AgentMessage, CatalogModel, Diagnostics, FileHit, GitBranchesResult, GitChangeScope, GitChangesResult, ProjectItem, SessionListItem, UiConfig } from "@omp-ui/protocol";
 
 export class HttpError extends Error {
 	readonly status: number;
@@ -116,6 +116,21 @@ export class BridgeHttp {
 	/** Chat-model catalog (omp models --json); slow on first call, cached by the bridge. */
 	listModels(): Promise<CatalogModel[]> {
 		return this.request("GET", "/api/models");
+	}
+
+	/** Read-only git working-tree changes for the 变更 panel. */
+	getGitChanges(cwd: string, scope: GitChangeScope): Promise<GitChangesResult> {
+		return this.request("GET", `/api/git/changes${queryString({ cwd, scope })}`);
+	}
+
+	/** Local branches of the workspace repo (`repo:false` outside a work tree). */
+	getGitBranches(cwd: string): Promise<GitBranchesResult> {
+		return this.request("GET", `/api/git/branches${queryString({ cwd })}`);
+	}
+
+	/** `git switch` to an existing local branch; resolves to the refreshed branch list. */
+	switchGitBranch(cwd: string, branch: string): Promise<GitBranchesResult> {
+		return this.request("POST", "/api/git/switch", { cwd, branch });
 	}
 
 	listProjects(): Promise<ProjectItem[]> {

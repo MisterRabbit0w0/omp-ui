@@ -188,6 +188,8 @@ export class OmpProcess {
 	#reassembler: ChunkReassembler | null = null;
 	#streaming = false;
 	#settled = true;
+	/** Subagents started and not yet ended (lifecycle frames), including detached background jobs and nested ones. */
+	readonly #runningSubagents = new Set<string>();
 	#stopRequested = false;
 	#lineBuffer = "";
 
@@ -204,6 +206,19 @@ export class OmpProcess {
 	/** `session_settled` seen (or no run started yet); pool eviction requires this. */
 	get settled(): boolean {
 		return this.#settled;
+	}
+
+	/**
+	 * Subagents still running inside this process. They run in-process, so stopping the process kills them; with
+	 * `async.enabled` they keep working after the parent's `session_settled`, which alone would look idle.
+	 */
+	get runningSubagents(): ReadonlySet<string> {
+		return this.#runningSubagents;
+	}
+
+	/** Anything in flight: a run, an open dialog, or a subagent. Idle processes are the only ones safe to stop. */
+	get busy(): boolean {
+		return !this.#settled || this.#streaming || this.pendingUi.size > 0 || this.#runningSubagents.size > 0;
 	}
 
 	get latestSeq(): number {
@@ -580,6 +595,15 @@ export class OmpProcess {
 			this.#settled = true;
 		} else if (frame.type === "agent_end") {
 			this.#streaming = false;
+		} else if (frame.type === "subagent_lifecycle") {
+			if (frame.payload.status === "started") this.#runningSubagents.add(frame.payload.id);
+			else this.#runningSubagents.delete(frame.payload.id);
+		} else if (frame.type === "subagent_progress") {
+			// Progress can report the end before the terminal lifecycle frame does.
+			const { id, status } = frame.payload.progress as { id?: unknown; status?: unknown };
+			if (typeof id === "string" && (status === "completed" || status === "failed" || status === "aborted")) {
+				this.#runningSubagents.delete(id);
+			}
 		}
 	}
 
@@ -649,6 +673,7 @@ export class OmpProcess {
 		}
 		this.#pending.clear();
 		this.#streaming = false;
+		this.#runningSubagents.clear();
 		this.state = this.#stopRequested || code === 0 ? "exited" : "crashed";
 		this.events.onStateChange(this.state, code, this.#stderrTail);
 	}

@@ -20,7 +20,7 @@ import type {
 import { DEFAULT_PORT, WS_PATH } from "@omp-ui/protocol";
 import { ConfigStore } from "./config";
 import { FileAccessError, readSessionFile, searchFiles } from "./files";
-import { listGitBranches, readGitChanges, switchGitBranch } from "./git";
+import { gitWorktreeRoot, listGitBranches, readGitChanges, switchGitBranch } from "./git";
 import { ModelCatalog } from "./models";
 import { ProcessPool } from "./pool";
 import { OmpProcess, resolveOmpCommand } from "./process";
@@ -110,16 +110,28 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const modelCatalog = new ModelCatalog(ompCommand, options.agentDir ?? defaultAgentDir());
 	const pool = new ProcessPool<OmpProcess>(options.poolMax);
 
-	/** True when a live process whose cwd resolves to `dir` is mid-run. */
-	const runningInWorkspace = async (dir: string): Promise<boolean> => {
+	/**
+	 * True when a live process mid-run works inside the git work tree containing `dir` (any subdirectory of it,
+	 * or a parent directory that contains it): a branch switch would rewrite files underneath that agent.
+	 * Outside a repository the directory itself is the unit.
+	 */
+	const runningInWorktree = async (dir: string): Promise<boolean> => {
+		const root = (await gitWorktreeRoot(dir)) ?? dir;
+		const inside = (child: string, parent: string): boolean => {
+			const rel = path.relative(parent, child);
+			return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+		};
 		for (const key of pool.keys()) {
 			const proc = pool.peek(key);
 			if (!proc || proc.settled) continue;
 			const procDir = await fs.promises.realpath(proc.options.cwd).catch(() => proc.options.cwd);
-			if (procDir === dir) return true;
+			if (inside(procDir, root) || inside(root, procDir)) return true;
 		}
 		return false;
 	};
+	/** Sessions whose DELETE is in flight: no process may be (re)started for them meanwhile. */
+	const deleting = new Set<string>();
+	const deletingFiles = new Set<string>();
 	const scanner = new SessionScanner({
 		...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
 		isLive: id => pool.has(id),
@@ -162,6 +174,9 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const spawnSession = async (
 		msg: Extract<C2B, { t: "start" }>,
 	): Promise<{ key: string; proc: OmpProcess }> => {
+		if (msg.resume !== undefined && deletingFiles.has(path.resolve(msg.cwd, msg.resume))) {
+			throw new Error("session is being deleted");
+		}
 		let key: string | null = null;
 		const proc = new OmpProcess(
 			{
@@ -213,6 +228,10 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			},
 		);
 		await proc.start();
+		if (proc.sessionId !== null && deleting.has(proc.sessionId)) {
+			await proc.stop();
+			throw new Error("session is being deleted");
+		}
 		key = proc.sessionId ?? `proc-${crypto.randomUUID()}`;
 		const previous = pool.get(key);
 		if (previous !== undefined) replacedProcs.add(previous);
@@ -290,6 +309,10 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				const proc = pool.get(msg.sessionId);
 				if (!proc) {
 					send(ws, { t: "error", reqId: msg.reqId, message: `no live process for session ${msg.sessionId}` });
+					return;
+				}
+				if (deleting.has(msg.sessionId)) {
+					send(ws, { t: "error", reqId: msg.reqId, message: `session ${msg.sessionId} is being deleted` });
 					return;
 				}
 				const response = await proc.send(msg.cmd);
@@ -387,11 +410,26 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				// Only a running session is protected (DESIGN §3.6); an idle open one is stopped first so its file is released.
 				const live = pool.get(id);
 				if (live !== undefined && live.settled === false) return errorJson(409, "session is running; stop it before deleting");
-				const file = await scanner.findFile(id);
-				if (!file) return errorJson(404, `unknown session: ${id}`);
-				if (live !== undefined) await pool.remove(id);
-				const target = await config.moveToTrash(file);
-				return json({ trashed: target });
+				if (deleting.has(id)) return errorJson(409, "session is already being deleted");
+				// Atomic with run admission: from here until the file is moved, `rpc` to this session is refused and no
+				// process may be started for it, so a prompt from another tab can't slip in during the awaits below.
+				deleting.add(id);
+				let file: string | undefined;
+				try {
+					file = await scanner.findFile(id);
+					if (!file) return errorJson(404, `unknown session: ${id}`);
+					deletingFiles.add(path.resolve(file));
+					const current = pool.get(id);
+					if (current !== undefined && current.settled === false) {
+						return errorJson(409, "session is running; stop it before deleting");
+					}
+					if (current !== undefined) await pool.remove(id);
+					const target = await config.moveToTrash(file);
+					return json({ trashed: target });
+				} finally {
+					deleting.delete(id);
+					if (file) deletingFiles.delete(path.resolve(file));
+				}
 			}
 		}
 		if (req.method === "GET" && url.pathname === "/api/models") {
@@ -440,7 +478,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				const branch = typeof body?.branch === "string" ? body.branch : "";
 				if (branch.length === 0) return errorJson(400, "cwd and branch are required");
 				// Writes to the working tree: never under a running agent (it would edit files mid-switch).
-				if (await runningInWorkspace(cwd)) {
+				if (await runningInWorktree(cwd)) {
 					return errorJson(409, "a session in this workspace is running; wait for it to finish");
 				}
 				const result = await switchGitBranch(cwd, branch);

@@ -477,6 +477,82 @@ describe("http api", () => {
 		expect(bad.status).toBe(403);
 	});
 
+	test("branch switch is refused while a session runs anywhere in the same worktree", async () => {
+		const repo = path.join(cwd, "mono");
+		const pkg = path.join(repo, "pkg-a");
+		fs.mkdirSync(pkg, { recursive: true });
+		const git = (...args: string[]) => {
+			const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" });
+			if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+		};
+		git("init");
+		git("config", "user.email", "t@example.test");
+		git("config", "user.name", "t");
+		git("config", "commit.gpgsign", "false");
+		fs.writeFileSync(path.join(pkg, "a.txt"), "a\n");
+		git("add", "-A");
+		git("commit", "-m", "init");
+		git("branch", "feature");
+
+		const ws = await connectAuthed();
+		ws.send({ t: "start", reqId: "wt-start", cwd: pkg });
+		const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === "wt-start");
+		if (started.t !== "started") throw new Error("unexpected");
+		const id = started.sessionId;
+		ws.send({ t: "attach", sessionId: id, sinceSeq: 0 });
+		ws.send({ t: "rpc", reqId: "wt-run", sessionId: id, cmd: { type: "prompt", message: "hold" } });
+		const request = await ws.waitMessage(
+			msg => msg.t === "frame" && msg.frame.type === "extension_ui_request" && msg.frame.method === "select",
+		);
+		const switchFrom = (dir: string) =>
+			api("/api/git/switch", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: dir, branch: "feature" }),
+			});
+		// The agent runs in pkg-a; the request comes from the repo root (a different cwd, same worktree).
+		expect((await switchFrom(repo)).status).toBe(409);
+		if (request.t === "frame" && request.frame.type === "extension_ui_request") {
+			ws.send({ t: "ui_response", sessionId: id, frame: { type: "extension_ui_response", id: request.frame.id, value: "Approve" } });
+		}
+		await ws.waitMessage(msg => msg.t === "frame" && msg.frame.type === "session_settled");
+		expect((await switchFrom(repo)).status).toBe(200);
+		await bridge.pool.remove(id);
+		ws.close();
+	});
+
+	test("deleting an idle open session refuses prompts while it is in flight", async () => {
+		const ws = await connectAuthed();
+		const id = await startSession(ws, "del-race");
+		ws.send({ t: "attach", sessionId: id, sinceSeq: 0 });
+		const file = path.join(tempDir("del-race"), `${id}.jsonl`);
+		fs.writeFileSync(file, "{}\n");
+		const original = bridge.scanner.findFile.bind(bridge.scanner);
+		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		bridge.scanner.findFile = async (sessionId: string) => {
+			if (sessionId !== id) return original(sessionId);
+			entered.resolve();
+			await gate.promise;
+			return file;
+		};
+		try {
+			const del = api(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+			await entered.promise;
+			// Another tab sends a prompt while the bridge is still locating the file.
+			ws.send({ t: "rpc", reqId: "del-race-run", sessionId: id, cmd: { type: "prompt", message: "late" } });
+			const refused = await ws.waitMessage(msg => msg.t === "error" && msg.reqId === "del-race-run");
+			expect(refused.t === "error" && refused.message).toContain("being deleted");
+			gate.resolve();
+			expect((await del).status).toBe(200);
+			expect(bridge.pool.has(id)).toBe(false);
+			expect(fs.existsSync(file)).toBe(false);
+		} finally {
+			bridge.scanner.findFile = original;
+			ws.close();
+		}
+	});
+
 	test("sessions list, transcript, archive, and trash delete (refusing live)", async () => {
 		const dir = path.join(agentDir, "sessions", "-C--proj");
 		fs.mkdirSync(dir, { recursive: true });

@@ -111,14 +111,18 @@ function unquoteGitPath(body: string): string {
 }
 
 /** Decode a possibly C-quoted patch path ("a/foo\tbar") and drop the a/ / b/ prefix. */
-function normalizePatchPath(raw: string): string | undefined {
+/**
+ * Path from a patch header. `stripSide` removes git's synthetic `a/`/`b/` prefix, which only `---`/`+++` and
+ * `diff --git` carry; `rename to` / `copy to` paths are bare, so a real top-level `a/` dir must survive there.
+ */
+function normalizePatchPath(raw: string, stripSide = true): string | undefined {
 	const trimmed = raw.startsWith('"') ? raw.trim() : raw.replace(/\t.*$/, "").trim();
 	if (!trimmed || trimmed === "/dev/null") return undefined;
 	const value =
 		trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2
 			? unquoteGitPath(trimmed.slice(1, -1))
 			: trimmed;
-	return value.replace(/^[ab]\//, "");
+	return stripSide ? value.replace(/^[ab]\//, "") : value;
 }
 
 /** Split one leading (possibly quoted) token off `text`: returns [token, rest]. */
@@ -227,10 +231,10 @@ export function parseDiffFiles(diffText: string): ParsedDiffFile[] {
 		} else if (line.startsWith("new file mode")) current.status = "A";
 		else if (line.startsWith("deleted file mode")) current.status = "D";
 		else if (line.startsWith("rename to ")) {
-			renameTo = normalizePatchPath(line.slice("rename to ".length));
+			renameTo = normalizePatchPath(line.slice("rename to ".length), false);
 			current.status = "R";
 		} else if (line.startsWith("copy to ")) {
-			renameTo = normalizePatchPath(line.slice("copy to ".length));
+			renameTo = normalizePatchPath(line.slice("copy to ".length), false);
 			current.status = "C";
 		} else if (line.startsWith("+++ ")) {
 			const p = normalizePatchPath(line.slice(4));
@@ -244,6 +248,23 @@ export function parseDiffFiles(diffText: string): ParsedDiffFile[] {
 	}
 	flush();
 	return files;
+}
+
+/** Read at most `max` bytes from the start of `file`. */
+async function readPrefix(file: string, max: number): Promise<Buffer> {
+	const handle = await fs.promises.open(file, "r");
+	try {
+		const buffer = Buffer.alloc(max);
+		let filled = 0;
+		while (filled < max) {
+			const { bytesRead } = await handle.read(buffer, filled, max - filled, filled);
+			if (bytesRead === 0) break;
+			filled += bytesRead;
+		}
+		return buffer.subarray(0, filled);
+	} finally {
+		await handle.close();
+	}
 }
 
 /**
@@ -276,17 +297,15 @@ async function untrackedFiles(
 			continue;
 		}
 		if (!stat.isFile()) continue;
+		const cap = Math.min(MAX_UNTRACKED_BYTES, bytesLeft);
 		let content: Buffer;
 		try {
-			content = await fs.promises.readFile(absolute);
+			// Never buffer the whole file: a multi-GB untracked artifact must not stall or OOM the bridge.
+			content = await readPrefix(absolute, cap);
 		} catch {
 			continue;
 		}
-		const cap = Math.min(MAX_UNTRACKED_BYTES, bytesLeft);
-		if (content.byteLength > cap) {
-			content = content.subarray(0, cap);
-			truncated = true;
-		}
+		if (content.byteLength < stat.size) truncated = true;
 		bytesLeft -= content.byteLength;
 		const displayPath = path.relative(root, absolute).split("\\").join("/");
 		if (content.subarray(0, Math.min(content.byteLength, 8_000)).includes(0)) {
@@ -307,6 +326,14 @@ async function untrackedFiles(
 	return { files, truncated };
 }
 
+/** Top of the git work tree containing `cwd` (canonical path), or null outside a repository. */
+export async function gitWorktreeRoot(cwd: string): Promise<string | null> {
+	const run = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+	const root = run?.code === 0 ? run.stdout.trim() : "";
+	if (!root) return null;
+	return fs.promises.realpath(root).catch(() => root);
+}
+
 export async function readGitChanges(cwd: string, scope: GitChangeScope): Promise<GitChangesResult> {
 	const rootRun = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
 	const root = rootRun?.code === 0 ? rootRun.stdout.trim() : "";
@@ -325,12 +352,15 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 
 	const parsed = parseDiffFiles(diffRun.stdout);
 	const files: GitChangedFile[] = parsed.slice(0, MAX_FILES).map(file => {
+		// Only the hunks: `diff --git` / `index` / mode / rename / `---`/`+++` records would otherwise render as
+		// numbered source lines in DiffView. Header-only patches (binary, mode/rename-only) get an empty diff.
+		const firstHunk = file.lines.findIndex(line => line.startsWith("@@"));
 		return {
 			path: file.path!,
 			status: file.status,
 			additions: file.additions,
 			deletions: file.deletions,
-			diff: file.lines.join("\n"),
+			diff: firstHunk < 0 ? "" : file.lines.slice(firstHunk).join("\n"),
 			...(file.binary ? { binary: true } : {}),
 		};
 	});

@@ -673,6 +673,17 @@ export function Composer({
 		}
 	};
 
+	/**
+	 * Model/thinking RPCs need a live process. While the lazy start (menu open on a preview / exited session) is
+	 * still in flight, a quick pick waits for that same start instead of failing with "no live process".
+	 */
+	const ensureLive = async (id: string): Promise<void> => {
+		const v = useAppStore.getState().views[id];
+		if (v && (v.readonly || v.proc === "none" || v.proc === "starting" || v.proc === "exited" || v.proc === "crashed")) {
+			await startSession(id);
+		}
+	};
+
 	const handleSelectModel = async (model: ModelInfo) => {
 		setSweepKey(k => k + 1);
 		if (!sessionId) {
@@ -680,6 +691,7 @@ export function Composer({
 			return;
 		}
 		try {
+			await ensureLive(sessionId);
 			const updated = await getBridge().rpc(sessionId, {
 				type: "set_model",
 				provider: model.provider,
@@ -700,6 +712,7 @@ export function Composer({
 			return;
 		}
 		try {
+			await ensureLive(sessionId);
 			await getBridge().rpc(sessionId, { type: "set_thinking_level", level });
 			updateSessionView(sessionId, v => ({
 				...v,
@@ -721,6 +734,7 @@ export function Composer({
 	const handleToggleFastMode = async (enabled: boolean) => {
 		if (!sessionId) return;
 		try {
+			await ensureLive(sessionId);
 			const res = await getBridge().rpc(sessionId, { type: "set_fast_mode", enabled });
 			updateSessionView(sessionId, v => ({
 				...v,
@@ -736,6 +750,7 @@ export function Composer({
 	const handleToggleSlowMode = async (enabled: boolean) => {
 		if (!sessionId) return;
 		try {
+			await ensureLive(sessionId);
 			const res = await getBridge().rpc(sessionId, { type: "set_slow_mode", enabled });
 			updateSessionView(sessionId, v => ({
 				...v,

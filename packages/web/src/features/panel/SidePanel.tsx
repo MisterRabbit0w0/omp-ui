@@ -3,7 +3,7 @@ import { useAppStore } from "@/store/app-store";
 import { useSessionView } from "@/store/hooks";
 import type { SessionView } from "@/store/session-reducer";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/Tabs";
-import { ChangesTab } from "./ChangesTab";
+import { ChangesTab, type FileFocusRequest } from "./ChangesTab";
 import { GoalTab } from "./GoalTab";
 import { InfoTab } from "./InfoTab";
 import {
@@ -59,7 +59,7 @@ export function SidePanel({
 
 	const [activeTab, setActiveTab] = useState<PanelTabId>(defaultTab);
 	const [seenBySession, setSeenBySession] = useState<Record<string, TabSignatures>>({});
-	const [focusedFilePath, setFocusedFilePath] = useState<string | null>(null);
+	const [focusRequest, setFocusRequest] = useState<FileFocusRequest | null>(null);
 	const [todoHeaderFlash, setTodoHeaderFlash] = useState(false);
 
 	const currentSignatures = computeTabSignatures(view, todoFlashAt);
@@ -104,7 +104,7 @@ export function SidePanel({
 			}
 			const fileTarget = detail.filePath ?? detail.file ?? detail.path;
 			if (fileTarget) {
-				setFocusedFilePath(fileTarget);
+				setFocusRequest(prev => ({ path: fileTarget, nonce: (prev?.nonce ?? 0) + 1 }));
 				if (!targetTab) setActiveTab("changes");
 			}
 		};
@@ -156,7 +156,7 @@ export function SidePanel({
 						<SubagentsTab sessionId={sessionId} view={view} />
 					</TabsContent>
 					<TabsContent value="changes" className="m-0 min-w-0 outline-none">
-						<ChangesTab view={view} focusedFilePath={focusedFilePath} />
+						<ChangesTab view={view} focusRequest={focusRequest} />
 					</TabsContent>
 					<TabsContent value="goal" className="m-0 min-w-0 outline-none">
 						<GoalTab sessionId={sessionId} view={view} />

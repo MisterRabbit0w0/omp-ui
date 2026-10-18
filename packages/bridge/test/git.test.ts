@@ -114,6 +114,38 @@ describe("readGitChanges edge cases", () => {
 		if (process.platform !== "win32") expect(result.files.map(f => f.path)).toContain("run.sh");
 	});
 
+	test("per-file diffs carry only hunks, no git metadata records", async () => {
+		const cwd = committed({ "a.txt": "one\n" });
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\ntwo\n");
+		const [file] = (await readGitChanges(cwd, "unstaged")).files;
+		expect(file!.diff.startsWith("@@ ")).toBe(true);
+		expect(file!.diff).not.toMatch(/^(diff --git|index |--- |\+\+\+ )/m);
+		expect(file!.additions).toBe(1);
+	});
+
+	test("a pure rename into a top-level a/ or b/ directory keeps that directory", async () => {
+		const cwd = committed({ "old.txt": "same content\n".repeat(20) });
+		fs.mkdirSync(path.join(cwd, "a"));
+		git(cwd, "mv", "old.txt", "a/new.txt");
+		const result = await readGitChanges(cwd, "staged");
+		expect(result.files.map(f => [f.path, f.status])).toEqual([["a/new.txt", "R"]]);
+		expect(result.files[0]!.diff).toBe("");
+	});
+
+	test("a huge untracked file is read only up to the per-file cap", async () => {
+		const cwd = committed({ "keep.txt": "x\n" });
+		const huge = path.join(cwd, "huge.log");
+		fs.writeFileSync(huge, "");
+		fs.truncateSync(huge, 64 * 1024 * 1024); // sparse; whole-file reads would allocate 64 MiB
+		fs.appendFileSync(huge, "tail\n");
+		const before = process.memoryUsage().rss;
+		const result = await readGitChanges(cwd, "unstaged");
+		const file = result.files.find(f => f.path === "huge.log");
+		expect(file).toBeDefined();
+		expect(result.truncated).toBe(true);
+		expect(process.memoryUsage().rss - before).toBeLessThan(48 * 1024 * 1024);
+	});
+
 	test("non-ASCII paths are decoded as UTF-8", async () => {
 		const cwd = committed({ "中文.txt": "一\n" });
 		fs.writeFileSync(path.join(cwd, "中文.txt"), "一\n二\n");

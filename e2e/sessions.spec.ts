@@ -14,10 +14,11 @@ test("opening a fixture session spawns nothing; opening the model menu starts it
 	// Browsing the sidebar does not spawn (pool slots stay with live work)…
 	expect(launches(bridge)).toHaveLength(0);
 	// …opening the model menu does: once attached, models and thinking are selectable without sending.
+	// The pick lands while the lazy start may still be in flight: it waits for that start instead of failing.
 	await app.getByRole("button", { name: /^模型：/ }).click();
-	await expect.poll(() => launches(bridge).length).toBe(1);
 	await popover(app).getByRole("button", { name: /model-mini/ }).click();
 	await expect(app.getByRole("button", { name: /^模型：model-mini/ })).toBeVisible();
+	expect(launches(bridge)).toHaveLength(1);
 	await app.keyboard.press("Escape");
 
 	await send(app, "continue please");

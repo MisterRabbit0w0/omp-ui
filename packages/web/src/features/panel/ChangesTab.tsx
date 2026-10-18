@@ -19,8 +19,16 @@ import {
 
 export interface ChangesTabProps {
 	view: SessionView | undefined;
-	/** File path requested to expand via `open-panel` / `open-panel-tab` event. */
-	focusedFilePath?: string | null;
+	/**
+	 * File requested to expand via `open-panel` / `open-panel-tab`. A fresh object per request (`nonce`), so
+	 * clicking the same file chip again re-focuses it even after the user switched scope in between.
+	 */
+	focusRequest?: FileFocusRequest | null;
+}
+
+export interface FileFocusRequest {
+	path: string;
+	nonce: number;
 }
 
 type ChangesScope = "session" | "latest-turn" | "unstaged" | "staged";
@@ -66,7 +74,7 @@ interface GitState {
  * - Each row is h-8: file icon + mono path + `+n −m`; expanding shows a merged DiffView.
  * - Session scopes also dispatch `scroll-to-tool` so clicking a row reveals the tool call.
  */
-export function ChangesTab({ view, focusedFilePath }: ChangesTabProps) {
+export function ChangesTab({ view, focusRequest }: ChangesTabProps) {
 	const cwd = useAppStore(s => s.sessions.find(item => item.id === view?.sessionId)?.cwd);
 	const [scope, setScope] = useState<ChangesScope>("session");
 	const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({});
@@ -122,10 +130,10 @@ export function ChangesTab({ view, focusedFilePath }: ChangesTabProps) {
 	}, [scope, sessionGroups, latestTurnGroups, activeGitResult]);
 
 	useEffect(() => {
-		if (!focusedFilePath) return;
+		if (!focusRequest) return;
 		setScope("session");
-		setExpandedPaths(prev => ({ ...prev, [focusedFilePath]: true }));
-	}, [focusedFilePath]);
+		setExpandedPaths(prev => ({ ...prev, [focusRequest.path]: true }));
+	}, [focusRequest]);
 
 	const counts: Record<ChangesScope, number | undefined> = {
 		session: sessionGroups.length,
@@ -167,6 +175,7 @@ export function ChangesTab({ view, focusedFilePath }: ChangesTabProps) {
 						<button
 							key={item.id}
 							type="button"
+							aria-pressed={active}
 							onClick={() => setScope(item.id)}
 							className={
 								"flex h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded-[6px] px-1 text-[11.5px] transition-colors " +

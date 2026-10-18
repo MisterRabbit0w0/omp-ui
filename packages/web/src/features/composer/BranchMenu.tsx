@@ -1,6 +1,6 @@
 import type { GitBranchesResult } from "@omp-ui/protocol";
 import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { notifyGitChanged } from "@/lib/git-events";
 import { getBridge } from "@/store/bridge-access";
 import { Popover, PopoverContent, PopoverTrigger } from "@/ui/Popover";
@@ -28,7 +28,10 @@ export function BranchMenuButton({ cwd, running = false, disabled = false }: Bra
 	const hl = useSlidingHighlight<HTMLDivElement>({ variant: "menu" });
 
 	// A different workspace must never show the previous repo's branch, so drop the snapshot only on cwd change.
+	// `cwdRef` lets a slow switch that started under the old workspace see that it is stale when it lands.
+	const cwdRef = useRef(cwd);
 	useEffect(() => {
+		cwdRef.current = cwd;
 		setInfo(null);
 	}, [cwd]);
 
@@ -64,13 +67,17 @@ export function BranchMenuButton({ cwd, running = false, disabled = false }: Bra
 	const choose = async (branch: string) => {
 		if (branch === info.current || switching) return;
 		setSwitching(branch);
+		const requestCwd = cwd;
 		try {
-			setInfo(await getBridge().http.switchGitBranch(cwd, branch));
+			const next = await getBridge().http.switchGitBranch(requestCwd, branch);
+			// The work tree changed either way; other views of that repo should refresh.
+			notifyGitChanged(requestCwd);
+			if (cwdRef.current !== requestCwd) return; // the user moved to another workspace meanwhile
+			setInfo(next);
 			setOpen(false);
-			notifyGitChanged(cwd);
 			toast(`已切换到 ${branch}`, "info");
 		} catch (err) {
-			toast(err instanceof Error ? err.message : "切换分支失败", "error");
+			if (cwdRef.current === requestCwd) toast(err instanceof Error ? err.message : "切换分支失败", "error");
 		} finally {
 			setSwitching(null);
 		}

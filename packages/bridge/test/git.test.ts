@@ -66,4 +66,19 @@ describe("readGitChanges", () => {
 		const blob = result.files.find(f => f.path === "blob.bin");
 		expect(blob?.binary).toBe(true);
 	});
+
+	test("does not read untracked symlink targets", async () => {
+		const cwd = initRepo();
+		const outside = tempDir("git-secret");
+		const secret = path.join(outside, "secret.txt");
+		fs.writeFileSync(secret, "top secret\n");
+		try {
+			fs.symlinkSync(secret, path.join(cwd, "link.txt"));
+		} catch {
+			return; // symlink privilege not available on this machine
+		}
+		const result = await readGitChanges(cwd, "unstaged");
+		expect(result.files.some(f => f.path === "link.txt")).toBe(false);
+		expect(JSON.stringify(result)).not.toContain("top secret");
+	});
 });

@@ -185,7 +185,8 @@ async function untrackedFiles(cwd: string, root: string): Promise<{ files: GitCh
 		const absolute = path.join(cwd, rel);
 		let stat: fs.Stats;
 		try {
-			stat = await fs.promises.stat(absolute);
+			// lstat: never follow a symlink out of the working tree while reading untracked content.
+			stat = await fs.promises.lstat(absolute);
 		} catch {
 			continue;
 		}
@@ -229,6 +230,7 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 		...(scope === "staged" ? ["--cached"] : []),
 		"--no-color",
 		"--no-ext-diff",
+		"--no-textconv",
 		"--find-renames",
 		"--unified=3",
 	]);

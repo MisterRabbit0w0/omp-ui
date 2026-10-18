@@ -15,7 +15,7 @@ import {
 import { useAppStore, type SendMode } from "@/store/app-store";
 import { getBridge, updateSessionView } from "@/store/bridge-access";
 import { useSessionView } from "@/store/hooks";
-import type { SessionView } from "@/store/session-reducer";
+import { hasRunningSubagents, type SessionView } from "@/store/session-reducer";
 import { Kbd } from "@/ui/Chip";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "@/ui/Menu";
 import { Tooltip } from "@/ui/Tooltip";
@@ -395,6 +395,8 @@ export function Composer({
 	const proc = view?.proc ?? "ready";
 	const readonly = view?.readonly ?? false;
 	const busy = isRunBusy(runKind);
+	// Background subagents run inside the session process: a permission restart would kill them.
+	const subagentsBusy = view ? hasRunningSubagents(view) : false;
 	const { disabled: composerDisabled, reason: disabledReason } = isComposerDisabled(proc, runKind, readonly);
 
 	const sendButtonState = getSendButtonState({
@@ -963,7 +965,7 @@ export function Composer({
 			context={welcome ? "welcome" : "session"}
 			restarting={restartingProc}
 			locked={bashRunning}
-			deferred={busy}
+			deferred={busy ? true : subagentsBusy ? "subagents" : false}
 			disabled={composerDisabled && !restartingProc}
 			open={permissionOpen}
 			onOpenChange={setPermissionOpen}

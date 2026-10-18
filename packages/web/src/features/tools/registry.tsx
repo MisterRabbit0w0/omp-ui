@@ -12,6 +12,11 @@ import { Dialog, DialogContent } from "../../ui/Dialog";
 import { toolIcon } from "../../ui/Icon";
 import { CodeBlock } from "./CodeBlock";
 import { computeDiffFromOldNew, DiffView, extractDiffSource, parseUnifiedDiffText } from "./DiffView";
+import {
+	buildSubagentTree,
+	flattenSubagentTree,
+	type SubagentTreeNode,
+} from "../subagents/subagent-utils";
 import { SubagentCapsule } from "./SubagentCapsule";
 
 export interface ToolRenderProps {
@@ -642,14 +647,15 @@ function TaskToolView(props: ToolRenderProps) {
 		return <GenericToolView {...props} />;
 	}
 
-	const matched: SubagentView[] = [];
-	if (subagents) {
-		for (const s of subagents.values()) {
-			if (s.parentToolCallId === callId) {
-				matched.push(s);
-			}
-		}
-	}
+	// Direct children of this task call, each carrying its nested subagent subtree
+	// (omp ids are dotted: "Anna.Bob" was spawned by Anna's own task call).
+	const matchedNodes: SubagentTreeNode[] = subagents
+		? flattenSubagentTree(buildSubagentTree(subagents.values())).filter(
+				n => n.subagent.parentToolCallId === callId,
+			)
+		: [];
+	const matched: SubagentView[] = matchedNodes.map(n => n.subagent);
+	const childrenById = new Map(matchedNodes.map(n => [n.subagent.id, n.children]));
 
 	// If no live subagents matched by parentToolCallId, synthesize capsules from args.tasks
 	if (matched.length === 0 && Array.isArray(args.tasks)) {
@@ -684,7 +690,12 @@ function TaskToolView(props: ToolRenderProps) {
 	return (
 		<div className="flex flex-col gap-2 py-0.5">
 			{matched.map(sub => (
-				<SubagentCapsule key={sub.id} subagent={sub} sessionId={sessionId} />
+				<SubagentCapsule
+					key={sub.id}
+					subagent={sub}
+					sessionId={sessionId}
+					childNodes={childrenById.get(sub.id)}
+				/>
 			))}
 		</div>
 	);

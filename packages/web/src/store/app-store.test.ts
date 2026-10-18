@@ -275,6 +275,32 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().views.s7!.pendingApprovalMode).toBeUndefined();
 	});
 
+	test("background subagents defer the switch even when the run is idle", async () => {
+		const { client, calls, starts } = recordingClient(["sb"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		const bg = { id: "Bg", index: 0, agent: "task", agentSource: "bundled" as const, status: "running" as const, detached: true, lastUpdate: 1 };
+		store.setState({
+			sessions: [sessionItem("sb")],
+			currentSessionId: "sb",
+			views: { sb: readyView("sb", { approvalMode: "write", subagents: new Map([["Bg", bg]]) }) },
+		});
+		await store.getState().restartWithApprovalMode("sb", "yolo");
+		expect(starts).toEqual([]);
+		expect(store.getState().views.sb!.pendingApprovalMode).toBe("yolo");
+		// the next prompt still goes out under the old mode while the subagent runs
+		await store.getState().sendPrompt("sb", "hello");
+		expect(starts).toEqual([]);
+		expect(calls.some(c => c.startsWith("rpc:prompt"))).toBe(true);
+		expect(store.getState().views.sb!.pendingApprovalMode).toBe("yolo");
+		expect(store.getState().toasts.some(t => t.message.includes("后台子代理"))).toBe(true);
+		// once it finished, the deferred pick applies before the next prompt
+		store.setState(s => ({
+			views: { ...s.views, sb: { ...s.views.sb!, run: { kind: "idle" }, subagents: new Map([["Bg", { ...bg, status: "completed" as const }]]) } },
+		}));
+		await store.getState().sendPrompt("sb", "again");
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "yolo" })]);
+	});
+
 	test("a deferred pick never restarts the process for a steer into a live run", async () => {
 		const { client, starts } = recordingClient(["s8"]);
 		const store = createAppStore({ client, http: {} as BridgeHttp });

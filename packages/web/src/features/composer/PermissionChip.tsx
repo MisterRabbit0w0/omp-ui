@@ -22,7 +22,8 @@ export interface PermissionChipProps {
 	/** Shell command running: the menu opens but the rows are disabled with a hint. */
 	locked?: boolean;
 	/** Run in progress: picking is allowed but only takes effect with the next request. */
-	deferred?: boolean;
+	/** Pick is deferred: `true` (request running) or `"subagents"` (background subagents still working). */
+	deferred?: boolean | "subagents";
 	disabled?: boolean;
 	open?: boolean;
 	onOpenChange?: (open: boolean) => void;
@@ -32,7 +33,8 @@ export interface PermissionMenuPanelProps {
 	mode: ApprovalMode;
 	context: "welcome" | "session";
 	locked?: boolean;
-	deferred?: boolean;
+	/** Pick is deferred: `true` (request running) or `"subagents"` (background subagents still working). */
+	deferred?: boolean | "subagents";
 	/** Called with the picked mode (never the current one). */
 	onPick: (mode: ApprovalMode) => void;
 }
@@ -87,8 +89,10 @@ export function PermissionMenuPanel({ mode, context, locked = false, deferred = 
 			<div className="mt-1 border-t border-line px-2.5 pt-1.5 pb-1 text-[11.5px] text-ink-2">
 				{locked
 					? "命令运行结束后可切换"
-					: deferred
-						? "当前请求仍在运行，切换将在下次请求时生效"
+					: deferred === "subagents"
+						? "后台子代理仍在运行，切换将在它们结束后的下次请求时生效"
+						: deferred
+							? "当前请求仍在运行，切换将在下次请求时生效"
 						: context === "session"
 							? "切换会重启会话进程，历史不受影响"
 							: "作用于这次新建的会话"}

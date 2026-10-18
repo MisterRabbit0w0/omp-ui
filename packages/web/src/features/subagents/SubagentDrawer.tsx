@@ -17,6 +17,9 @@ import {
 	createSubagentCursorState,
 	extractSubagentMeta,
 	OPEN_SUBAGENT_EVENT,
+	openSubagentDrawer,
+	subagentChildren,
+	subagentLineage,
 	type OpenSubagentEventDetail,
 	type SubagentCursorState,
 } from "./subagent-utils";
@@ -256,6 +259,13 @@ export function SubagentDrawer({
 		return s.views[sid]?.subagents.get(activeSubagentId);
 	});
 	const subagent = storeSubagent ?? propSubagent;
+	const subagentsMap: Map<string, SubagentView> | undefined = useAppStore(s => {
+		const sid = activeSessionId ?? s.currentSessionId;
+		return sid ? s.views[sid]?.subagents : undefined;
+	});
+	const lineage = subagentsMap && activeSubagentId ? subagentLineage(activeSubagentId, subagentsMap) : [];
+	const childSubagents =
+		subagentsMap && activeSubagentId ? subagentChildren(activeSubagentId, subagentsMap) : [];
 
 	// Listen for `open-subagent` custom DOM events.
 	useEffect(() => {
@@ -375,7 +385,14 @@ export function SubagentDrawer({
 				const prev = v.subagents.get(activeSubagentId);
 				if (!prev) return v;
 				const nextMap = new Map(v.subagents);
-				nextMap.set(activeSubagentId, { ...prev, status: "aborted", lastUpdate: Date.now() });
+				const now = Date.now();
+				nextMap.set(activeSubagentId, { ...prev, status: "aborted", lastUpdate: now });
+				// omp cancels the whole subtree: nested subagents share the dotted id prefix.
+				for (const [id, s] of v.subagents) {
+					if (id.startsWith(`${activeSubagentId}.`) && (s.status === "running" || s.status === "pending")) {
+						nextMap.set(id, { ...s, status: "aborted", lastUpdate: now });
+					}
+				}
 				return { ...v, subagents: nextMap };
 			});
 			setConfirmCancel(false);
@@ -429,6 +446,63 @@ export function SubagentDrawer({
 					<X size={14} strokeWidth={2.2} />
 				</IconButton>
 			</div>
+
+			{/* Subagent tree: ancestors breadcrumb + direct children */}
+			{(lineage.length > 0 || childSubagents.length > 0) && (
+				<div
+					className="flex shrink-0 flex-col gap-1.5 border-b border-line px-4 py-2 text-[12px]"
+					data-testid="subagent-tree-nav"
+				>
+					{lineage.length > 0 && (
+						<nav aria-label="父级子代理" className="flex min-w-0 flex-wrap items-center gap-1 text-ink-2">
+							<span className="shrink-0 text-ink-3">上级</span>
+							{lineage.map(parent => (
+								<span key={parent.id} className="inline-flex items-center gap-1">
+									<button
+										type="button"
+										onClick={() => openSubagentDrawer(activeSessionId, parent.id)}
+										className="rounded-chip px-1 text-accent-ink hover:bg-hover hover:underline"
+										data-subagent-link={parent.id}
+									>
+										{parent.agent}
+									</button>
+									<span className="text-ink-3" aria-hidden="true">›</span>
+								</span>
+							))}
+							<span className="font-medium text-ink">{subagent?.agent ?? activeSubagentId}</span>
+						</nav>
+					)}
+					{childSubagents.length > 0 && (
+						<div className="flex min-w-0 flex-wrap items-center gap-1" aria-label="下级子代理">
+							<span className="shrink-0 text-ink-3">下级 {childSubagents.length}</span>
+							{childSubagents.map(child => (
+								<button
+									key={child.id}
+									type="button"
+									onClick={() => openSubagentDrawer(activeSessionId, child.id)}
+									className="inline-flex h-7 items-center gap-1 rounded-full bg-inset pr-2 pl-0.5 text-ink-2 shadow-hairline hover:bg-hover"
+									data-subagent-link={child.id}
+								>
+									{child.status === "running" || child.status === "pending" ? (
+										<SpinnerRing active={child.status === "running"} index={child.index} />
+									) : (
+										<StatusBadge
+											status={
+												child.status === "completed"
+													? "success"
+													: child.status === "failed"
+														? "error"
+														: "aborted"
+											}
+										/>
+									)}
+									<span className="max-w-40 truncate">{child.agent}</span>
+								</button>
+							))}
+						</div>
+					)}
+				</div>
+			)}
 
 			{/* Transcript body */}
 			<div className="min-h-0 flex-1 overflow-auto px-4 py-3">

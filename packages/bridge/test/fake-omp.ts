@@ -171,6 +171,8 @@ const assistantMessage = (text: string, toolCall?: Record<string, unknown>): Rec
 	timestamp: Date.now(),
 });
 
+const backgroundSubagents = new Set<string>();
+
 const runPrompt = async (commandId: unknown, message: string): Promise<void> => {
 	const messageId = `m-${++messageSeq}`;
 	const big = message.includes("BIGFRAME");
@@ -219,6 +221,17 @@ const runPrompt = async (commandId: unknown, message: string): Promise<void> => 
 	emit({ type: "message_start", messageId: `${messageId}-r`, message: toolResult });
 	emit({ type: "message_end", messageId: `${messageId}-r`, message: toolResult });
 	emit({ type: "turn_end", message: assistantMessage(text, toolCall), toolResults: [toolResult] });
+	// BGSUB: a detached background subagent (with a nested child) keeps running past the settle, like omp's
+	// `async.enabled` task jobs; `cancel_subagent` ends it.
+	if (message.includes("BGSUB")) {
+		for (const [subId, index] of [["Bg", 0], ["Bg.Child", 0]] as const) {
+			backgroundSubagents.add(subId);
+			emit({
+				type: "subagent_lifecycle",
+				payload: { id: subId, agent: "task", agentSource: "bundled", status: "started", index, parentToolCallId: subId === "Bg" ? "call-1" : "call-bg-1", detached: true },
+			});
+		}
+	}
 	emit({ type: "agent_end", messages: [assistantMessage(text, toolCall), toolResult], yielded: true });
 	emit({ type: "prompt_result", agentInvoked: true, status: "completed", sessionSettled: true, id: commandId });
 	emit({ type: "session_settled" });
@@ -561,6 +574,16 @@ const handleCommand = (cmd: Record<string, unknown>): void => {
 					respondError(id, type, err instanceof Error ? err.message : String(err));
 				}
 			})();
+			return;
+		}
+		case "cancel_subagent": {
+			const target = typeof cmd.subagentId === "string" ? cmd.subagentId : "";
+			const ended = [...backgroundSubagents].filter(subId => subId === target || subId.startsWith(`${target}.`)).reverse();
+			for (const subId of ended) {
+				backgroundSubagents.delete(subId);
+				emit({ type: "subagent_lifecycle", payload: { id: subId, agent: "task", agentSource: "bundled", status: "aborted", index: 0 } });
+			}
+			respond(id, type, { cancelled: ended.length > 0 });
 			return;
 		}
 		case "prompt":

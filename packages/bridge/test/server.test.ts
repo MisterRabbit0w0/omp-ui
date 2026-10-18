@@ -681,3 +681,56 @@ describe("elastic pool release", () => {
 		}
 	});
 });
+
+describe("background subagents keep their process", () => {
+	test("a settled session with running subagents is neither released nor reported idle until they end", async () => {
+		const previousId = process.env.FAKE_OMP_SESSION_ID;
+		const own = await createBridge({
+			port: 0,
+			token: TOKEN,
+			ompCommand: FAKE_OMP_COMMAND,
+			ompVersion: "18.11.1",
+			agentDir: tempDir("bg-agent"),
+			configDir: tempDir("bg-config"),
+			poolMax: 1,
+			poolHardMax: 4,
+		});
+		try {
+			const ws = TestWs.connect(`ws://127.0.0.1:${own.port}/ws`);
+			await ws.ready();
+			ws.hello(TOKEN);
+			await ws.waitMessage(msg => msg.t === "welcome");
+			const start = async (id: string, reqId: string): Promise<string> => {
+				process.env.FAKE_OMP_SESSION_ID = id;
+				ws.send({ t: "start", reqId, cwd });
+				const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === reqId);
+				if (started.t !== "started") throw new Error("unexpected");
+				return started.sessionId;
+			};
+			const a = await start("bg-a", "b1");
+			ws.send({ t: "attach", sessionId: a });
+			await runPrompt(ws, a, "b2", "BGSUB work");
+			await ws.waitMessage(msg => msg.t === "frame" && msg.sessionId === a && msg.frame.type === "session_settled");
+			const proc = own.pool.peek(a)!;
+			expect(proc.settled).toBe(true);
+			expect([...proc.runningSubagents].sort()).toEqual(["Bg", "Bg.Child"]);
+			expect(proc.busy).toBe(true);
+
+			const b = await start("bg-b", "b3"); // over the soft cap, but a's background work must survive
+			ws.send({ t: "focus", sessionId: b }); // the user moved on to b
+			await Bun.sleep(50);
+			expect(own.pool.has(a)).toBe(true);
+			const released = (msg: B2C) => msg.t === "proc" && msg.sessionId === a && msg.reason === "released";
+			expect(ws.messages.some(released)).toBe(false);
+
+			ws.send({ t: "rpc", reqId: "b4", sessionId: a, cmd: { type: "cancel_subagent", subagentId: "Bg" } });
+			await ws.waitMessage(released); // the last subagent ended: back down to the soft cap
+			expect(own.pool.has(a)).toBe(false);
+			ws.close();
+		} finally {
+			if (previousId === undefined) delete process.env.FAKE_OMP_SESSION_ID;
+			else process.env.FAKE_OMP_SESSION_ID = previousId;
+			await own.close();
+		}
+	});
+});

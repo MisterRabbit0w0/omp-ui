@@ -8,11 +8,20 @@ import type { SubagentView } from "../../store/session-reducer";
 import { Pill, StatusBadge } from "../../ui/Chip";
 import { Collapsible } from "../../ui/Collapsible";
 import { SpinnerRing } from "../../ui/Spinner";
+import {
+	countActiveSubagentDescendants,
+	countSubagentDescendants,
+	type SubagentTreeNode,
+} from "../subagents/subagent-utils";
 
 export interface SubagentCapsuleProps {
 	subagent: SubagentView;
 	sessionId?: string;
 	defaultOpen?: boolean;
+	/** Nested subagents spawned by this one (rendered recursively when expanded). */
+	childNodes?: SubagentTreeNode[];
+	/** Nesting depth; nested capsules use a flatter style. */
+	depth?: number;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -75,8 +84,12 @@ export function dispatchOpenSubagent(sessionId: string | undefined, subagentId: 
 	);
 }
 
-export function SubagentCapsule({ subagent, sessionId, defaultOpen }: SubagentCapsuleProps) {
+export function SubagentCapsule({ subagent, sessionId, defaultOpen, childNodes, depth = 0 }: SubagentCapsuleProps) {
 	const [open, setOpen] = useState(defaultOpen ?? subagent.status === "running");
+	const children = childNodes ?? [];
+	const self: SubagentTreeNode = { subagent, children, depth };
+	const descendantCount = countSubagentDescendants(self);
+	const activeDescendants = countActiveSubagentDescendants(self);
 	const metaText = formatProgressMeta(subagent.progress);
 	const detailRows = extractProgressEntries(subagent.progress);
 	const desc = subagent.description ?? subagent.task ?? subagent.assignment ?? "";
@@ -97,9 +110,13 @@ export function SubagentCapsule({ subagent, sessionId, defaultOpen }: SubagentCa
 
 	return (
 		<div
+			data-subagent-id={subagent.id}
+			data-subagent-depth={depth}
 			className={
-				"bg-surface shadow-card transition-[border-radius] duration-300 " +
-				(open ? "rounded-[14px]" : "rounded-[22px]")
+				depth > 0
+					? "rounded-[12px] bg-inset"
+					: "bg-surface shadow-card transition-[border-radius] duration-300 " +
+						(open ? "rounded-[14px]" : "rounded-[22px]")
 			}
 		>
 			<div className="flex h-[44px] w-full items-center gap-2.5 px-2.5 text-left">
@@ -115,6 +132,15 @@ export function SubagentCapsule({ subagent, sessionId, defaultOpen }: SubagentCa
 					<span className="shrink-0 text-[13px] font-medium text-ink">{subagent.agent}</span>
 					{desc && <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">{desc}</span>}
 					{metaText && <span className="mono shrink-0 text-[11.5px] text-ink-2 tabular-nums">{metaText}</span>}
+					{descendantCount > 0 && (
+						<span
+							className="shrink-0 rounded-full bg-hover px-1.5 text-[11px] leading-[18px] text-ink-2 tabular-nums"
+							title={activeDescendants > 0 ? `${activeDescendants} 个子代理运行中` : undefined}
+							data-testid="subagent-descendants"
+						>
+							+{descendantCount} 子代理
+						</span>
+					)}
 					{renderPill()}
 				</button>
 				<button
@@ -154,6 +180,19 @@ export function SubagentCapsule({ subagent, sessionId, defaultOpen }: SubagentCa
 								查看完整记录 →
 							</button>
 						</div>
+						{children.length > 0 && (
+							<div className="mt-1.5 flex flex-col gap-1.5" data-testid="subagent-children">
+								{children.map(child => (
+									<SubagentCapsule
+										key={child.subagent.id}
+										subagent={child.subagent}
+										sessionId={sessionId}
+										childNodes={child.children}
+										depth={depth + 1}
+									/>
+								))}
+							</div>
+						)}
 					</div>
 				</div>
 			</Collapsible>

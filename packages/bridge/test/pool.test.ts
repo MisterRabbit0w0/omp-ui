@@ -5,6 +5,7 @@ class FakeProc implements PoolProcess {
 	streaming = false;
 	settled = true;
 	pendingUi = new Map<string, unknown>();
+	runningSubagents = new Set<string>();
 	stopped = 0;
 	async stop(): Promise<void> {
 		this.stopped++;
@@ -58,6 +59,22 @@ describe("ProcessPool", () => {
 		await flushMicrotasks();
 		expect(busy.stopped).toBe(0);
 		expect(pool.size).toBe(2);
+	});
+
+	test("processes with running (background) subagents are not evicted", async () => {
+		let now = 0;
+		const pool = new ProcessPool<FakeProc>({ softMax: 1, hardMax: 1, idleTtlMs: 1, now: () => now });
+		const parent = new FakeProc(); // settled, but a detached subagent still works in-process
+		parent.runningSubagents.add("Bg");
+		pool.set("parent", parent);
+		pool.set("other", new FakeProc());
+		await flushMicrotasks();
+		now = 10;
+		expect(await pool.reapIdle()).not.toContain("parent");
+		await expect(pool.reserve()).rejects.toBeInstanceOf(PoolFullError);
+		expect(parent.stopped).toBe(0);
+		parent.runningSubagents.clear();
+		expect(await pool.reapIdle()).toContain("parent");
 	});
 
 	test("unsettled processes are not evicted", async () => {

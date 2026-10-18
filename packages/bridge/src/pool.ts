@@ -9,7 +9,8 @@
  * - **Idle TTL** (default 10 min): an unpinned, settled process with no use for that long is released even
  *   below the soft cap, so a quiet bridge hands its memory back.
  *
- * Eviction requires `settled`, not `streaming`, and no open UI requests. Unpinned processes go before pinned ones.
+ * Eviction requires `settled`, not `streaming`, no open UI requests and no running subagents (they run in-process,
+ * and background ones outlive the parent's settle). Unpinned processes go before pinned ones.
  */
 import * as os from "node:os";
 
@@ -18,6 +19,8 @@ export interface PoolProcess {
 	readonly streaming: boolean;
 	readonly settled: boolean;
 	readonly pendingUi: { readonly size: number };
+	/** In-process subagents still running (background jobs outlive the parent's settle). */
+	readonly runningSubagents: { readonly size: number };
 	stop(): Promise<void>;
 }
 
@@ -235,6 +238,6 @@ export class ProcessPool<T extends PoolProcess> {
 	}
 
 	#evictable(proc: T): boolean {
-		return proc.settled && !proc.streaming && proc.pendingUi.size === 0;
+		return proc.settled && !proc.streaming && proc.pendingUi.size === 0 && proc.runningSubagents.size === 0;
 	}
 }

@@ -17,6 +17,10 @@ export interface SubagentRowProps {
 	variant?: "capsule" | "list";
 	defaultOpen?: boolean;
 	onOpenTranscript?: (subagentId: string) => void;
+	/** Nesting depth in the subagent tree ("list" variant indents by depth). */
+	depth?: number;
+	/** Number of nested subagents below this one (shown as a count chip). */
+	descendantCount?: number;
 }
 
 function SubagentStatusGlyph({ subagent }: { subagent: SubagentView }) {
@@ -70,7 +74,10 @@ export function SubagentRow({
 	variant = "capsule",
 	defaultOpen = false,
 	onOpenTranscript,
+	depth = 0,
+	descendantCount = 0,
 }: SubagentRowProps) {
+	const indent = variant === "list" ? Math.min(depth, 6) * 16 : 0;
 	const [open, setOpen] = useState(defaultOpen);
 	const meta = extractSubagentMeta(subagent.progress);
 	const detailRows = extractSubagentDetailRows(subagent);
@@ -88,18 +95,36 @@ export function SubagentRow({
 			: "border-b border-line last:border-b-0";
 
 	return (
-		<div className={outerClass} data-subagent-id={subagent.id}>
+		<div
+			className={outerClass}
+			data-subagent-id={subagent.id}
+			data-subagent-depth={depth}
+			style={indent > 0 ? { paddingLeft: indent } : undefined}
+		>
 			<button
 				type="button"
 				aria-expanded={open}
 				onClick={() => setOpen(v => !v)}
 				className="flex h-11 w-full items-center gap-2.5 px-2.5 text-left transition-colors duration-100 hover:bg-hover/60"
 			>
+				{depth > 0 && (
+					<span className="-ml-1 shrink-0 text-[12px] text-ink-3" aria-hidden="true">
+						└
+					</span>
+				)}
 				<SubagentStatusGlyph subagent={subagent} />
 				<span className="shrink-0 text-[13px] font-medium text-ink">{subagent.agent}</span>
 				<span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">{description}</span>
 				{meta !== null && (
 					<span className="shrink-0 font-mono text-[11.5px] text-ink-2 tabular-nums">{meta}</span>
+				)}
+				{descendantCount > 0 && (
+					<span
+						className="shrink-0 rounded-full bg-hover px-1.5 text-[11px] leading-[18px] text-ink-2 tabular-nums"
+						data-testid="subagent-descendants"
+					>
+						+{descendantCount}
+					</span>
 				)}
 				<SubagentStatusPill status={subagent.status} />
 				<ChevronDown

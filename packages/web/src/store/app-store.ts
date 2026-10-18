@@ -31,13 +31,14 @@ import {
 } from "../features/composer/new-session-config";
 import {
 	createSessionView,
+	hasRunningSubagents,
+	mergeSubagentSnapshots,
 	reduce,
 	reduceProc,
 	reducePromptAck,
 	releaseProc,
 	resolveUi,
 	resetForResync,
-	subagentsFromSnapshots,
 	type SessionEffect,
 	type SessionView,
 	type ViewMessage,
@@ -673,8 +674,9 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					updateView(sessionId, v => ({ ...v, approvalMode: mode, pendingApprovalMode: undefined }));
 					return sessionId;
 				}
-				// Run in progress: restarting now would kill it. Remember the pick; sendPrompt applies it before the next request.
-				if (view.proc === "ready" && view.run.kind !== "idle") {
+				// Run in progress (or background subagents still working): restarting now would kill it. Remember the
+				// pick; sendPrompt applies it before the next request once nothing is running.
+				if (view.proc === "ready" && (view.run.kind !== "idle" || hasRunningSubagents(view))) {
 					const effective = view.approvalMode ?? get().config?.defaultApprovalMode ?? "write";
 					updateView(sessionId, v => ({ ...v, pendingApprovalMode: mode === effective ? undefined : mode }));
 					return sessionId;
@@ -750,7 +752,7 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					if (models.status === "fulfilled") next = { ...next, models: models.value.models ?? [] };
 					if (thinkingLevels.status === "fulfilled") next = { ...next, thinkingLevels: thinkingLevels.value.levels ?? [] };
 					if (commands.status === "fulfilled") next = { ...next, commands: commands.value.commands ?? [] };
-					if (subagents.status === "fulfilled") next = { ...next, subagents: subagentsFromSnapshots(subagents.value.subagents ?? []) };
+					if (subagents.status === "fulfilled") next = { ...next, subagents: mergeSubagentSnapshots(next.subagents, subagents.value.subagents ?? []) };
 					if (btw.status === "fulfilled") next = { ...next, btw: new Map((btw.value.records ?? []).map(r => [r.id, r])) };
 					if (stats.status === "fulfilled") next = { ...next, stats: stats.value, statsStale: false };
 					return next;
@@ -768,13 +770,16 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				}
 				// A permission change picked during the previous run takes effect now, before this request. Idle only:
 				// steering/follow-up into a live run must never restart the process.
+				// Background subagents outlive the run: restarting would kill them, so keep the old mode for now.
 				const afterStart = get().views[sessionId];
-				if (
+				const pendingDiffers =
 					afterStart?.pendingApprovalMode !== undefined &&
 					afterStart.proc === "ready" &&
 					afterStart.run.kind === "idle" &&
-					afterStart.pendingApprovalMode !== afterStart.approvalMode
-				) {
+					afterStart.pendingApprovalMode !== afterStart.approvalMode;
+				if (pendingDiffers && hasRunningSubagents(afterStart)) {
+					get().pushToast("info", "后台子代理仍在运行，权限切换将在它们结束后生效，本条消息沿用当前权限");
+				} else if (pendingDiffers && afterStart?.pendingApprovalMode !== undefined) {
 					sessionId = await get().restartWithApprovalMode(sessionId, afterStart.pendingApprovalMode);
 				} else if (afterStart?.pendingApprovalMode !== undefined && afterStart.pendingApprovalMode === afterStart.approvalMode) {
 					updateView(sessionId, v => ({ ...v, pendingApprovalMode: undefined }));

@@ -1,4 +1,9 @@
-import { SubagentRow } from "@/features/subagents";
+import {
+	buildSubagentTree,
+	countSubagentDescendants,
+	flattenSubagentTree,
+	SubagentRow,
+} from "@/features/subagents";
 import type { SessionView } from "@/store/session-reducer";
 import { Card } from "@/ui/Card";
 
@@ -9,14 +14,14 @@ export interface SubagentsTabProps {
 
 /**
  * FRONTEND §6.16 & §6.13 子代理 tab:
- * Renders `view.subagents` using `SubagentRow` in `"list"` variant inside a `<Card>`.
+ * Renders `view.subagents` as a tree (dotted ids, indented by depth) using
+ * `SubagentRow` in `"list"` variant inside a `<Card>`.
  */
 export function SubagentsTab({ sessionId, view }: SubagentsTabProps) {
-	const subagents = view
-		? [...view.subagents.values()].sort((a, b) => a.index - b.index)
-		: [];
+	// Pre-order flatten of the dotted-id tree: nested subagents follow their parent.
+	const nodes = view ? flattenSubagentTree(buildSubagentTree(view.subagents.values())) : [];
 
-	if (subagents.length === 0) {
+	if (nodes.length === 0) {
 		return (
 			<Card className="px-3 py-3 text-[12.5px] text-ink-2">
 				当前会话暂无子代理
@@ -26,13 +31,15 @@ export function SubagentsTab({ sessionId, view }: SubagentsTabProps) {
 
 	return (
 		<Card>
-			{subagents.map((sub, idx) => (
+			{nodes.map((node, idx) => (
 				<SubagentRow
-					key={sub.id}
-					subagent={sub}
+					key={node.subagent.id}
+					subagent={node.subagent}
 					sessionId={sessionId}
 					variant="list"
-					defaultOpen={idx === 0 && sub.status === "running"}
+					depth={node.depth}
+					descendantCount={countSubagentDescendants(node)}
+					defaultOpen={idx === 0 && node.subagent.status === "running"}
 				/>
 			))}
 		</Card>

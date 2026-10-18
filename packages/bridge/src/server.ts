@@ -145,7 +145,8 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 		};
 		for (const key of pool.keys()) {
 			const proc = pool.peek(key);
-			if (!proc || proc.settled) continue;
+			// Background subagents edit the work tree too.
+			if (!proc || (proc.settled && proc.runningSubagents.size === 0)) continue;
 			const procDir = await fs.promises.realpath(proc.options.cwd).catch(() => proc.options.cwd);
 			if (inside(procDir, root) || inside(root, procDir)) return true;
 		}
@@ -157,7 +158,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const scanner = new SessionScanner({
 		...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
 		isLive: id => pool.has(id),
-		isRunning: id => pool.get(id)?.settled === false,
+		isRunning: id => pool.peek(id)?.busy === true,
 		isArchived: id => config.config.archived.includes(id),
 	});
 	const webDist = options.webDist ?? path.resolve(import.meta.dir, "../../web/dist");
@@ -229,9 +230,16 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					pool.touch(key);
 					broadcastToSession(key, { t: "frame", sessionId: key, seq, frame });
 					// Run start/end flips `running` in the session list; tabs not attached to this session need it.
-					if (frame.type === "agent_start" || frame.type === "session_settled") broadcast({ t: "sessions_changed" });
-					// A run that ended may leave the pool over its soft cap (it grew while everything was busy).
-					if (frame.type === "session_settled") queueMicrotask(() => void pool.rebalance());
+					const subagentEnded = frame.type === "subagent_lifecycle" && frame.payload.status !== "started";
+					if (
+						frame.type === "agent_start" ||
+						frame.type === "session_settled" ||
+						(frame.type === "subagent_lifecycle" && (frame.payload.status === "started" || proc.runningSubagents.size === 0))
+					) {
+						broadcast({ t: "sessions_changed" });
+					}
+					// A run (or the last background subagent) that ended may leave the pool over its soft cap.
+					if (frame.type === "session_settled" || subagentEnded) queueMicrotask(() => void pool.rebalance());
 				},
 				onUiResolved: (id, auto) => {
 					if (key === null) return;
@@ -457,7 +465,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			if (req.method === "DELETE" && segments.length === 3) {
 				// Only a running session is protected (DESIGN §3.6); an idle open one is stopped first so its file is released.
 				const live = pool.get(id);
-				if (live !== undefined && live.settled === false) return errorJson(409, "session is running; stop it before deleting");
+				if (live !== undefined && (live.settled === false || live.runningSubagents.size > 0)) return errorJson(409, "session is running; stop it before deleting");
 				if (deleting.has(id)) return errorJson(409, "session is already being deleted");
 				// Atomic with run admission: from here until the file is moved, `rpc` to this session is refused and no
 				// process may be started for it, so a prompt from another tab can't slip in during the awaits below.
@@ -468,7 +476,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					if (!file) return errorJson(404, `unknown session: ${id}`);
 					deletingFiles.add(path.resolve(file));
 					const current = pool.get(id);
-					if (current !== undefined && current.settled === false) {
+					if (current !== undefined && (current.settled === false || current.runningSubagents.size > 0)) {
 						return errorJson(409, "session is running; stop it before deleting");
 					}
 					if (current !== undefined) await pool.remove(id);

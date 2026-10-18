@@ -96,10 +96,11 @@ omp-ui/
 - 恢复会话：追加 `--resume <sessionFile>`。崩溃恢复用 `--restore <sessionFile>`。
 - 只读预览先展示、选中即预热：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史；用户停留约 150 ms 后前端在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"），快速扫过侧边栏只会启动最终停留的那一个。权限切换、模型/思考级别、发送都作用在这个进程上：启动进行中时它们等待同一个启动（权限切换在启动完成后再按新模式重启），不会重复 spawn 或丢失选择。
 - 弹性进程池（`pool.ts`）：
-  - 软上限默认 6（`poolMax`）。超过软上限时立即回收最久未用的空闲进程（`isSettled=true`、未在流式输出、无待答 UI 请求）。
+  - 软上限默认 6（`poolMax`）。超过软上限时立即回收最久未用的空闲进程（`isSettled=true`、未在流式输出、无待答 UI 请求、没有仍在运行的子代理）。
   - 前端通过 `focus` 告知当前查看的会话；被任一标签页查看的进程被"钉住"，不参与软上限回收，回收顺序为未查看的在前。
   - 当所有进程都在工作或被查看时池子可以越过软上限扩容，直到硬上限：默认按空闲内存（每进程预算约 300 MB，保留 1 GB）与 CPU 数（×4，最多 32）动态计算，且不低于软上限（`poolHardMax` 可固定）。达到硬上限时先回收空闲进程（含被查看的），仍无可回收时拒绝启动并提示"进程池已满"，绝不杀正在工作的进程。
-  - 运行结束（`session_settled`）、切换查看、标签页断开时重新平衡，扩容出来的进程回落到软上限以内。
+  - 子代理（含 `async.enabled` 下的后台 detached 子代理）在 omp 进程内运行，可能在 `session_settled` 之后继续工作。Bridge 按 `subagent_lifecycle`/`subagent_progress` 跟踪仍在运行的子代理 id：有运行中子代理的进程算"忙"（侧边栏显示运行中、不被回收、删除会话返回 409），最后一个结束时广播 `sessions_changed` 并重新平衡。前端在此期间也不会为权限切换重启进程：选择被记为待生效，之后的消息先沿用当前权限，子代理全部结束后的下一次请求前才重启生效。
+- 运行结束（`session_settled`）、子代理结束、切换查看、标签页断开时重新平衡，扩容出来的进程回落到软上限以内。
   - 空闲回收：未被查看且空闲超过 10 分钟（`poolIdleTtlMs`）的进程即使在软上限内也会被释放。
   - 回收即 `SIGTERM`，5 秒后 `SIGKILL`；广播 `{t:"proc", state:"exited", reason:"released"}`。前端把视图置为"未启动"（保留历史、不显示退出横幅），下次查看/发送/打开模型菜单时按需重新启动。
 - `omp` 可执行路径：`OMP_UI_OMP_BIN` > `Bun.which("omp")`。启动时运行 `omp --version`，低于 18.11.0 拒绝并提示。
@@ -544,14 +545,17 @@ interface ToolRenderer {
 
 ### 10.1 数据
 
-`subagent_lifecycle` 建立/更新 `{id, index, agent, agentSource, description, status, sessionFile, parentToolCallId, detached}`；`subagent_progress` 按 `index` 更新 `progress`（原始 `AgentProgress`，通用展示：当前工具、轮次、tokens 等已知字段，其余 JSON）。冷启动用 `get_subagents`。
+`subagent_lifecycle` 建立/更新 `{id, index, agent, agentSource, description, status, sessionFile, parentToolCallId, detached}`；`subagent_progress` 按 `progress.id`（即子代理 id）更新 `progress` 与状态（原始 `AgentProgress`，通用展示：当前工具、轮次、tokens 等已知字段，其余 JSON）。`index` 只是在单次 `task` 调用内的序号，跨调用、跨层级会重复，仅在缺少 `progress.id` 时与 `parentToolCallId` 一起作为兜底键。冷启动/重连用 `get_subagents` 合并：omp 的名册会剔除已结束的子代理，所以已见过的结束项保留（树的父节点不丢），名册里没有的"运行中"项视为已在离线期间结束并移除。进程退出/崩溃时仍在运行的子代理标为中止。
+
+**树形关系**：omp 子代理可以再派生子代理，id 为点分层级（`Anna.Bob` 是 Anna 派生的 Bob），所有层级的事件都经同一条 RPC 流到达；`parentToolCallId` 是所属 `task` 调用在其父（子）会话中的工具调用 id。前端据此建树：父节点 = 已知子代理中最长的点分前缀（中间层缺失时挂到最近的已知祖先，否则为根），同层按 `index`、id 排序。
 
 ### 10.2 呈现
 
-- 在 `task` 工具卡内按 `parentToolCallId` 嵌入子代理行：代理名、描述、状态、实时进度一行。
-- 右侧面板列出全部（含 detached 后台任务）。
+- 在 `task` 工具卡内按 `parentToolCallId` 嵌入直接子代理行：代理名、描述、状态、实时进度一行；有后代时显示 "+N 子代理"，展开后递归嵌套显示其子树。
+- 右侧面板按树的先序列出全部（含 detached 后台任务），按层级缩进，父行显示后代数量。
 - 点击打开抽屉：`get_subagent_messages {subagentId, fromByte}` 增量读取（运行中每 1.5s 轮询，用 `nextByte`，`reset:true` 时清空重来），用同一套对话流组件只读渲染。抽屉打开期间将订阅升到 `events` 以获得实时流，关闭后降回 `progress`。
-- 抽屉底部：输入框 → `steer_subagent`；「终止」→ `cancel_subagent`（确认）。
+- 抽屉顶部显示层级导航：「上级」面包屑（可点回祖先）与「下级」子代理标签（可直接打开）。
+- 抽屉底部：输入框 → `steer_subagent`；「终止」→ `cancel_subagent`（确认，omp 连同其后代一并终止，前端同步把运行中的后代标为中止）。
 
 ---
 

@@ -96,6 +96,14 @@ export function writeFixtureSessions(agentDir: string, cwd: string): Bridge["fix
 			msg("d1", null, { role: "user", content: [{ type: "text", text: "hi glyph" }], timestamp: 1 }),
 		]),
 	);
+	// The scanner sorts by max(title.updatedAt, file mtime). Rapid writes can
+	// share an mtime in CI, hiding an arbitrary fixture in the three-row preview.
+	for (const name of fs.readdirSync(dir)) {
+		const file = path.join(dir, name);
+		const title = JSON.parse(fs.readFileSync(file, "utf8").split("\n", 1)[0]!) as { updatedAt: string };
+		const timestamp = new Date(title.updatedAt);
+		fs.utimesSync(file, timestamp, timestamp);
+	}
 	return ids;
 }
 

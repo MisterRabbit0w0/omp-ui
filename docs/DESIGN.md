@@ -94,7 +94,7 @@ omp-ui/
 - 一个打开的会话对应一个 `omp --mode rpc-ui` 子进程，以 `sessionId` 为键。
 - 新会话：`omp --mode rpc-ui --cwd <dir> [--model p/id] [--thinking L] [--approval-mode M]`。
 - 恢复会话：追加 `--resume <sessionFile>`。崩溃恢复用 `--restore <sessionFile>`。
-- 只读预览不 spawn：侧边栏点开一个未激活的会话时，Bridge 直接解析 jsonl 渲染只读视图；用户首次输入或点「继续」时再 spawn（启动约 2–6 秒，期间显示 "启动中"）。
+- 只读预览先展示、进程随即预热：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史，前端随后在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"）。模型/思考级别选择器在发送前即可用；首次发送复用同一个进程。
 - 进程池上限默认 6。超限时回收最久未用、`isSettled=true` 且无待答 UI 请求的进程（`SIGTERM`，5 秒后 `SIGKILL`）。正在流式输出或有待答请求的进程永不回收。
 - `omp` 可执行路径：`OMP_UI_OMP_BIN` > `Bun.which("omp")`。启动时运行 `omp --version`，低于 18.11.0 拒绝并提示。
 - stderr 收集到每进程 200KB 环形缓冲，在「诊断」面板可看。
@@ -273,6 +273,7 @@ HTTP（均需 Bearer）
 | GET | `/api/projects` | 去重的 cwd 列表 + 最近使用时间 |
 | GET | `/api/files?cwd=&q=` | @ 提及：`git ls-files` 优先，否则遍历（排除 node_modules/.git），前 50 个模糊匹配 |
 | GET | `/api/file?cwd=&path=` | 受限只读，≤1MB |
+| GET | `/api/git/changes?cwd=&scope=unstaged\|staged` | 只读 git 变更（工作区 / 暂存区，含未跟踪文件；输出有上限） |
 | GET | `/api/export?path=` | 下载 `export_html` 生成的文件（路径必须是该命令返回过的） |
 | GET/PUT | `/api/config` | UI 配置 |
 | GET | `/api/diagnostics/:sessionId` | stderr 尾部、解析错误、帧统计 |
@@ -365,7 +366,7 @@ settling/running ──session_settled──▶ idle
 | `confirm` | 模态确认 | `{confirmed}` |
 | `input` | 模态单行输入；OAuth 流程中紧跟 `open_url` 时并入同一张登录卡 | `{value}` |
 | `editor` | 模态多行编辑器，`prefill` 预填 | `{value}` |
-| `ask` | 对话流内问卷卡：每题一组，单选/多选，`preview` 展开显示，始终有「其他」自由输入，`recommended` 预选 | `{answers:[{id, selectedOptions, customInput?}]}`（按题目顺序） |
+| `ask` | 对话流内问卷卡：锚定到运行中的 `ask` 工具卡（无对应工具行时回退到流末尾）；每题一组，单选/多选，`preview` 展开显示，始终有「其他」自由输入，`recommended` 预选 | `{answers:[{id, selectedOptions, customInput?}]}`（按题目顺序） |
 | `cancel` | 关闭 `targetId` 对应界面，后续回答忽略 | 无 |
 | `notify` | toast | 无 |
 | `setStatus` | 头部状态 chip（`statusText` 为空则移除） | 无 |
@@ -513,7 +514,7 @@ interface ToolRenderer {
 
 - Todo：按 phase 分组，状态图标（pending/in_progress/completed/abandoned/blocked+blocker 文本），`details`/`notes` 展开。可勾选、编辑、增删 → `set_todos`。`todo_reminder` 时面板标题闪一下。
 - 子代理：§10.2。
-- 变更：从对话流汇总所有 `edit`/`write`/`notebook` 成功调用，按文件分组，点击跳到对应工具卡或打开合并 diff。只是对话中的记录，不读 git。
+- 变更：多口径展示。**本会话**汇总所有 `edit`/`write`/`notebook` 成功调用并按文件合并；**最近一轮**只保留最近一次实际改动文件的助手回合；**未暂存 / 已暂存**调用 Bridge 的只读 git API（`git diff` 工作区 / `--cached`，未暂存含未跟踪文件），支持手动刷新。会话口径可点击跳到对应工具卡。
 - Goal：无 goal 时显示创建表单（目标、token 预算）→ `goal {op:"create"}`；有 goal 时显示状态、`tokensUsed/tokenBudget` 进度、用时，按钮暂停/恢复/放弃。
 - 信息：`get_session_stats` 全部字段、`routedModels`、会话文件路径、sessionId、系统提示词（`state.systemPrompt`，折叠）、工具列表（`state.dumpTools`）。
 
@@ -526,7 +527,7 @@ interface ToolRenderer {
   - 账号：`get_login_providers` 列表，登录 → `login`（流程走 `open_url` + `input`），登出 → `get_logout_accounts` 选凭据 → `logout`。登录在一个专门的 "控制进程" 上执行（Bridge 维护的一个 `--no-session` 进程），不依赖具体会话。
   - 默认值：新会话的模型、思考级别、审批模式（存 `~/.omp-ui/config.json`）。
   - 会话行为：steering/follow-up 模式、interrupt 模式、自动压缩、自动重试、cache warming（作用于当前会话）。
-  - 外观：主题、字号、等宽字体、对话宽度、紧凑模式。
+  - 外观：主题、字号（按 12/13/14 缩放全部文本，不改变 16px rem 布局）、等宽字体、对话宽度、紧凑模式（压缩对话流与工具卡的垂直间距）。
   - 通知：桌面通知开关、声音。
   - 快捷键列表（只读）。
 

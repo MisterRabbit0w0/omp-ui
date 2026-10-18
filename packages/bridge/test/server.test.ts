@@ -734,3 +734,39 @@ describe("background subagents keep their process", () => {
 		}
 	});
 });
+
+describe("in-process session switch (branch / fork)", () => {
+	test("rekeys the pool, updates attached/focused state, and broadcasts session_switched before rpc_result", async () => {
+		const prevId = process.env.FAKE_OMP_SESSION_ID;
+		process.env.FAKE_OMP_SESSION_ID = "branch-origin-id";
+		const ws = await connectAuthed();
+		try {
+			const sessionId = await startSession(ws, "sw-1");
+			expect(sessionId).toBe("branch-origin-id");
+			ws.send({ t: "attach", sessionId, sinceSeq: 0 });
+			ws.send({ t: "focus", sessionId });
+			await ws.waitMessage(msg => msg.t === "proc" && msg.sessionId === sessionId && msg.state === "ready");
+
+			ws.send({ t: "rpc", reqId: "branch-1", sessionId, cmd: { type: "branch", entryId: "e1" } });
+			const switched = await ws.waitMessage(msg => msg.t === "session_switched");
+			const rpcResult = await ws.waitMessage(msg => msg.t === "rpc_result" && msg.reqId === "branch-1");
+
+			expect(switched).toMatchObject({
+				t: "session_switched",
+				fromSessionId: sessionId,
+				sessionId: `${sessionId}-branched`,
+			});
+			expect(ws.messages.indexOf(switched)).toBeLessThan(ws.messages.indexOf(rpcResult));
+			expect(bridge.pool.has(sessionId)).toBe(false);
+			expect(bridge.pool.has(`${sessionId}-branched`)).toBe(true);
+
+			// Subsequent frames from the process are routed under the new sessionId, never the old one.
+			await runPrompt(ws, `${sessionId}-branched`, "p-after-branch", "hello on branch");
+			expect(ws.messages.some(m => m.t === "frame" && m.sessionId === `${sessionId}-branched` && m.frame.type === "agent_start")).toBe(true);
+		} finally {
+			if (prevId === undefined) delete process.env.FAKE_OMP_SESSION_ID;
+			else process.env.FAKE_OMP_SESSION_ID = prevId;
+			ws.close();
+		}
+	});
+});

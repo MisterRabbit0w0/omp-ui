@@ -482,6 +482,72 @@ describe("process warm-up and release (§3.1)", () => {
 	});
 });
 
+describe("in-process session switch (branch / fork)", () => {
+	test("session_switched detaches the source view onto a readonly snapshot and moves the live view to the new sessionId", async () => {
+		const { client } = recordingClient(["s-branch"]);
+		const oldMessages = [
+			{ role: "user" as const, content: [{ type: "text" as const, text: "Ciallo" }], timestamp: 1 },
+			{ role: "assistant" as const, content: [], api: "openai", provider: "p", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "aborted" as const, timestamp: 2 },
+		];
+		const http = {
+			getTranscript: async (id: string) => (id === "s-old" ? oldMessages : []),
+			listSessions: async () => [
+				{ ...sessionItem("s-new"), live: true },
+				{ ...sessionItem("s-old"), live: false },
+			],
+		} as unknown as BridgeHttp;
+		const store = createAppStore({ client, http });
+		store.setState({
+			sessions: [sessionItem("s-old")],
+			currentSessionId: "s-old",
+			views: {
+				"s-old": readyView("s-old", {
+					approvalMode: "yolo",
+					messages: oldMessages,
+				}),
+			},
+		});
+
+		store.getState().dispatch({
+			t: "session_switched",
+			fromSessionId: "s-old",
+			sessionId: "s-new",
+			sessionFile: "/tmp/s-new.jsonl",
+		});
+
+		expect(store.getState().currentSessionId).toBe("s-new");
+		const oldView = store.getState().views["s-old"]!;
+		expect(oldView.proc).toBe("none");
+		expect(oldView.readonly).toBe(true);
+		expect(oldView.messages).toEqual(oldMessages);
+
+		const newView = store.getState().views["s-new"]!;
+		expect(newView.proc).toBe("ready");
+		expect(newView.readonly).toBe(false);
+		expect(newView.approvalMode).toBe("yolo");
+
+		// Streaming into the new session never mutates the old session's view.
+		const replyMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Ciallo~ 👋" }],
+			api: "openai",
+			provider: "p",
+			model: "m",
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "stop" as const,
+			timestamp: 3,
+		};
+		store.getState().dispatch({
+			t: "frame",
+			sessionId: "s-new",
+			seq: 1,
+			frame: { type: "message_end", messageId: "m-1", message: replyMsg },
+		});
+		expect(store.getState().views["s-new"]!.messages).toEqual([{ ...replyMsg, animateOnMount: true }]);
+		expect(store.getState().views["s-old"]!.messages).toEqual(oldMessages);
+	});
+});
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!predicate()) {

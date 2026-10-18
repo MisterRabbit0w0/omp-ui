@@ -236,17 +236,19 @@ export function SessionHeader({
 		try {
 			const bridge = getBridge();
 			bridge.send({ t: "stop", sessionId });
+			bridge.detach(sessionId);
 			updateSessionView(sessionId, v => ({ ...v, proc: "starting" }));
 			if (sessionItem) {
-				await bridge.start({
+				const started = await bridge.start({
 					cwd: sessionItem.cwd,
 					resume: sessionItem.file,
 					model: view?.state?.model ? `${view.state.model.provider}/${view.state.model.id}` : config?.defaultModel,
 					thinking: view?.state?.thinkingLevel ?? config?.defaultThinking,
 					approvalMode: view?.approvalMode ?? config?.defaultApprovalMode,
 				});
-				bridge.attach(sessionId);
-				await useAppStore.getState().coldStart(sessionId);
+				const activeId = started.sessionId || sessionId;
+				bridge.attach(activeId);
+				await useAppStore.getState().coldStart(activeId);
 			}
 			toast("已重启会话进程", "success");
 		} catch (err) {

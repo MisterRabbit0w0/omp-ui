@@ -586,6 +586,22 @@ const handleCommand = (cmd: Record<string, unknown>): void => {
 			respond(id, type, { cancelled: ended.length > 0 });
 			return;
 		}
+		case "branch": {
+			const prevFile = sessionFile;
+			sessionId = `${sessionId}-branched`;
+			sessionFile = path.join(path.dirname(prevFile), `branched_${sessionId}.jsonl`);
+			messages.length = 0;
+			headerWritten = false;
+			respond(id, type, { text: "branched text", cancelled: false });
+			return;
+		}
+		case "fork": {
+			const prevFile = sessionFile;
+			sessionId = `${sessionId}-forked`;
+			sessionFile = path.join(path.dirname(prevFile), `forked_${sessionId}.jsonl`);
+			respond(id, type, { cancelled: false });
+			return;
+		}
 		case "prompt":
 			// Real omp: an admitted prompt is acked with no `data` (only local slash commands carry agentInvoked).
 			respond(id, type);

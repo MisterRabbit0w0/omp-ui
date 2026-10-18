@@ -264,6 +264,17 @@ export class BridgeClient {
 				this.opts.onMessage?.(msg);
 				return;
 			}
+			case "session_switched": {
+				if (this.attached.has(msg.fromSessionId)) {
+					this.attached.delete(msg.fromSessionId);
+					this.attached.set(msg.sessionId, 0);
+				}
+				if (this.focused === msg.fromSessionId) {
+					this.focused = msg.sessionId;
+				}
+				this.opts.onMessage?.(msg);
+				return;
+			}
 			case "error": {
 				if (msg.reqId) {
 					const p = this.pending.get(msg.reqId) ?? this.startPending.get(msg.reqId);

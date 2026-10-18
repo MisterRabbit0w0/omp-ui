@@ -161,6 +161,19 @@ export class ProcessPool<T extends PoolProcess> {
 		void this.rebalance(key);
 	}
 
+	/** Move a live process to a new session key without stopping it (in-process branch/fork/switch). */
+	rekey(oldKey: string, newKey: string): boolean {
+		if (oldKey === newKey) return this.#entries.has(oldKey);
+		const entry = this.#entries.get(oldKey);
+		if (!entry) return false;
+		this.#entries.delete(oldKey);
+		const displaced = this.#entries.get(newKey);
+		this.#use(entry);
+		this.#entries.set(newKey, entry);
+		if (displaced && displaced.proc !== entry.proc) void displaced.proc.stop();
+		return true;
+	}
+
 	async remove(key: string): Promise<void> {
 		const entry = this.#entries.get(key);
 		if (!entry) return;

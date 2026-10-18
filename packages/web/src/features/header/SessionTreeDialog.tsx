@@ -140,14 +140,25 @@ export function SessionTreeDialog({
 		if (!sessionId || !selected || branching) return;
 		setBranching(true);
 		try {
-			const res = await getBridge().rpc(sessionId, { type: "branch", entryId: selected.id });
-			if (!res.cancelled) {
-				if (res.text) {
-					useAppStore.setState({ composerInsert: { sessionId, text: res.text, at: Date.now() } });
+			if (selected.role === "user") {
+				const res = await getBridge().rpc(sessionId, { type: "branch", entryId: selected.id });
+				if (!res.cancelled) {
+					const targetSessionId = useAppStore.getState().currentSessionId ?? sessionId;
+					if (res.text) {
+						useAppStore.setState({ composerInsert: { sessionId: targetSessionId, text: res.text, at: Date.now() } });
+					}
+					await useAppStore.getState().coldStart(targetSessionId);
+					toast("已切换到选定分支节点", "success");
+					onOpenChange(false);
 				}
-				await useAppStore.getState().coldStart(sessionId);
-				toast("已切换到选定分支节点", "success");
-				onOpenChange(false);
+			} else {
+				const res = await getBridge().rpc(sessionId, { type: "fork", entryId: selected.id });
+				if (!res.cancelled) {
+					const targetSessionId = useAppStore.getState().currentSessionId ?? sessionId;
+					await useAppStore.getState().coldStart(targetSessionId);
+					toast("已从选定节点分叉为新会话", "success");
+					onOpenChange(false);
+				}
 			}
 		} catch (err) {
 			toast(err instanceof Error ? err.message : "切换分支失败", "error");

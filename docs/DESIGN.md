@@ -266,6 +266,7 @@ type B2C =
   | { t: "ui_resolved"; sessionId: string; id: string }
   | { t: "proc"; sessionId: string; state: "starting" | "ready" | "exited" | "crashed";
       reason?: "released"; code?: number; stderrTail?: string }   // released = 进程池回收空闲进程，非错误
+  | { t: "session_switched"; fromSessionId: string; sessionId: string; sessionFile?: string }  // 进程内切换/分叉/重来产生新 sessionId
   | { t: "sessions_changed" }
   | { t: "error"; reqId?: string; message: string };
 ```

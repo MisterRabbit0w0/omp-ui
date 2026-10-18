@@ -31,6 +31,8 @@ export function HandoffDialog({
 				type: "handoff",
 				...(customInstructions ? { customInstructions } : {}),
 			});
+			const targetSessionId = useAppStore.getState().currentSessionId ?? sessionId;
+			await useAppStore.getState().coldStart(targetSessionId);
 			await useAppStore.getState().loadSessions();
 			toast("已生成交接上下文", "success");
 			setInstructions("");

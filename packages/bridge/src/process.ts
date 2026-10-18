@@ -73,6 +73,8 @@ export interface OmpProcessEvents {
 	/** A pendingUi request was answered — by a client or by auto-approve. */
 	onUiResolved(id: string, auto: boolean): void;
 	onStateChange(state: OmpProcState, code?: number, stderrTail?: string): void;
+	/** Fired when an in-process command (`branch`, `fork`, `new_session`, `switch_session`, `open_session`) switches the active session id. */
+	onSessionChange?(sessionId: string, sessionFile: string | null): void;
 }
 
 export interface ReplayResult {
@@ -282,12 +284,7 @@ export class OmpProcess {
 		}
 
 		try {
-			const stateResponse = await this.send({ type: "get_state" });
-			const data: unknown = stateResponse.data;
-			if (typeof data === "object" && data !== null) {
-				if ("sessionId" in data && typeof data.sessionId === "string") this.sessionId = data.sessionId;
-				if ("sessionFile" in data && typeof data.sessionFile === "string") this.sessionFile = data.sessionFile;
-			}
+			await this.#sendRaw({ type: "get_state" });
 		} catch {
 			// Some modes (control processes) have no session id; the caller assigns a key.
 		}
@@ -301,7 +298,25 @@ export class OmpProcess {
 	 * Send a command; resolves with the correlated `response` frame.
 	 * The bridge assigns ids (`b-<n>`); per-command timeouts per §3.2.4.
 	 */
-	send(cmd: RpcCommand, options?: { timeoutMs?: number }): Promise<RpcResponse> {
+	async send(cmd: RpcCommand, options?: { timeoutMs?: number }): Promise<RpcResponse> {
+		const response = await this.#sendRaw(cmd, options);
+		if (
+			response.success &&
+			(cmd.type === "branch" || cmd.type === "fork" || cmd.type === "new_session" || cmd.type === "switch_session")
+		) {
+			const data = response.data as { cancelled?: unknown } | undefined;
+			if (data?.cancelled !== true) {
+				try {
+					await this.#sendRaw({ type: "get_state" });
+				} catch {
+					// Process may have exited mid-command; ignore.
+				}
+			}
+		}
+		return response;
+	}
+
+	#sendRaw(cmd: RpcCommand, options?: { timeoutMs?: number }): Promise<RpcResponse> {
 		if (this.state === "exited" || this.state === "crashed" || !this.#proc) {
 			return Promise.resolve({
 				type: "response",
@@ -329,6 +344,28 @@ export class OmpProcess {
 			this.#pending.set(id, { command: cmd.type, resolve, timer });
 			this.#write({ ...(cmd as Record<string, unknown>), id });
 		});
+	}
+
+	#applySessionIdentity(sessionId: string, sessionFile: string | null): void {
+		if (sessionFile !== null) this.sessionFile = sessionFile;
+		if (this.sessionId === null) {
+			this.sessionId = sessionId;
+			return;
+		}
+		if (this.sessionId === sessionId) return;
+		// The process moved in-place to a new session: drop the previous session's buffered frames and UI state.
+		this.#ring = [];
+		this.#ringBytes = 0;
+		this.#seq = 0;
+		this.pendingUi.clear();
+		this.autoResolved.clear();
+		this.autoApprove.clear();
+		this.#runningSubagents.clear();
+		this.#streaming = false;
+		this.#settled = true;
+		this.sessionId = sessionId;
+		this.sessionFile = sessionFile;
+		this.events.onSessionChange?.(sessionId, this.sessionFile);
 	}
 
 	/**
@@ -513,6 +550,19 @@ export class OmpProcess {
 			if (pending) {
 				this.#pending.delete(response.id!);
 				clearTimeout(pending.timer);
+				if (
+					response.success &&
+					(pending.command === "get_state" || pending.command === "open_session") &&
+					typeof response.data === "object" &&
+					response.data !== null
+				) {
+					const data = response.data as Record<string, unknown>;
+					if (pending.command !== "open_session" || data.cancelled !== true) {
+						const nextId = typeof data.sessionId === "string" ? data.sessionId : null;
+						const nextFile = typeof data.sessionFile === "string" ? data.sessionFile : null;
+						if (nextId !== null) this.#applySessionIdentity(nextId, nextFile);
+					}
+				}
 				if (pending.command === "login") {
 					const wasCancelled = response.id !== undefined && this.#cancelledLoginIds.delete(response.id);
 					if (wasCancelled && !response.success) {
@@ -538,6 +588,15 @@ export class OmpProcess {
 			return;
 		}
 		const serverFrame = frame as unknown as RpcServerFrame;
+		if (
+			serverFrame.type === "session_info_update" &&
+			typeof serverFrame.sessionId === "string" &&
+			this.sessionId !== null &&
+			serverFrame.sessionId !== this.sessionId
+		) {
+			this.#applySessionIdentity(serverFrame.sessionId, null);
+			void this.#sendRaw({ type: "get_state" }).catch(() => undefined);
+		}
 		this.#trackRunState(serverFrame);
 		const seq = ++this.#seq;
 		this.#ringPush({ seq, frame: serverFrame });

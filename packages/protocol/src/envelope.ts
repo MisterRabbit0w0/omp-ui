@@ -53,6 +53,8 @@ export type B2C =
 	| { t: "ui_resolved"; sessionId: string; id: string; auto?: boolean }
 	/** `reason: "released"`: the pool stopped an idle process to free resources (not an error; restart on demand). */
 	| { t: "proc"; sessionId: string; state: ProcState; reason?: "released"; code?: number; stderrTail?: string }
+	/** A live process switched in-place to a new session id/file (e.g. `branch`, `fork`, `new_session`, `switch_session`, `open_session`). */
+	| { t: "session_switched"; fromSessionId: string; sessionId: string; sessionFile?: string }
 	| { t: "sessions_changed" }
 	| { t: "error"; reqId?: string; message: string };
 

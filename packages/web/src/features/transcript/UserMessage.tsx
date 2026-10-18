@@ -106,10 +106,11 @@ export function UserMessageView({
 			const bridge = getBridge();
 			const res = await bridge.rpc(sessionId, { type: "branch", entryId });
 			if (!res.cancelled) {
+				const targetSessionId = useAppStore.getState().currentSessionId ?? sessionId;
 				useAppStore.setState({
-					composerInsert: { sessionId, text: res.text || text, at: Date.now() },
+					composerInsert: { sessionId: targetSessionId, text: res.text || text, at: Date.now() },
 				});
-				await useAppStore.getState().coldStart(sessionId);
+				await useAppStore.getState().coldStart(targetSessionId);
 			}
 		} catch (err) {
 			pushToast("error", err instanceof Error ? err.message : "无法从此处重来");

@@ -250,6 +250,35 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 						...(auto ? { auto: true } : {}),
 					});
 				},
+				onSessionChange: (newSessionId, newSessionFile) => {
+					if (key === null || key === newSessionId) return;
+					const oldKey = key;
+					key = newSessionId;
+					const existingTarget = pool.peek(newSessionId);
+					if (existingTarget !== undefined && existingTarget !== proc) {
+						replacedProcs.add(existingTarget);
+					}
+					if (pool.peek(oldKey) === proc) {
+						pool.rekey(oldKey, newSessionId);
+					} else {
+						pool.set(newSessionId, proc);
+					}
+					for (const ws of clients) {
+						if (ws.data.attached.delete(oldKey)) {
+							ws.data.attached.add(newSessionId);
+						}
+						if (ws.data.focused === oldKey) {
+							ws.data.focused = newSessionId;
+						}
+					}
+					broadcast({
+						t: "session_switched",
+						fromSessionId: oldKey,
+						sessionId: newSessionId,
+						...(newSessionFile !== null ? { sessionFile: newSessionFile } : {}),
+					});
+					broadcast({ t: "sessions_changed" });
+				},
 				onStateChange: (state, code, stderrTail) => {
 					if (key === null) return;
 					const terminal = state === "exited" || state === "crashed";

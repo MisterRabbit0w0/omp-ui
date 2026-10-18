@@ -360,15 +360,30 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 			else setTimeout(run, delay);
 		};
 
-		const attachAndStart = async (sessionId: string, opts: StartOptions): Promise<void> => {
+		const attachAndStart = async (sessionId: string, opts: StartOptions): Promise<string> => {
 			const c = requireClient();
 			updateView(sessionId, v => ({ ...v, proc: "starting" }));
 			// A previous (exited / released) process's last seq would make the new ring's replay start mid-way.
 			c.detach?.(sessionId);
 			// The bridge only accepts `attach` for a live process, so start first; attach replays the ring from seq 0.
-			await c.start(opts);
-			c.attach(sessionId);
-			await store.getState().coldStart(sessionId);
+			const started = await c.start(opts);
+			const currentId = started.sessionId || sessionId;
+			if (currentId !== sessionId) {
+				renamedSessions.set(sessionId, currentId);
+				set(s => {
+					const { [sessionId]: previous, ...rest } = s.views;
+					return {
+						currentSessionId: s.currentSessionId === sessionId ? currentId : s.currentSessionId,
+						views: previous ? { ...rest, [currentId]: { ...previous, sessionId: currentId } } : s.views,
+						sessions: s.sessions.map(it =>
+							it.id === sessionId ? { ...it, id: currentId, file: started.sessionFile ?? it.file } : it,
+						),
+					};
+				});
+			}
+			c.attach(currentId);
+			await store.getState().coldStart(currentId);
+			return currentId;
 		};
 
 		return {
@@ -437,6 +452,106 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 						}
 						updateView(msg.sessionId, v => reduceProc(v, msg.state, { code: msg.code, stderrTail: msg.stderrTail }));
 						break;
+					case "session_switched": {
+						if (msg.fromSessionId === msg.sessionId) break;
+						flushFrames();
+						let reloadSourceId: string | null = null;
+						set(s => {
+							const sourceView = s.views[msg.fromSessionId];
+							const sourceItem = s.sessions.find(it => it.id === msg.fromSessionId);
+							const keepSource = Boolean(
+								(sourceItem && (sourceItem.sizeBytes > 0 || sourceItem.file.length > 0)) ||
+									(sourceView && sourceView.messages.length > 0),
+							);
+							if (!keepSource) renamedSessions.set(msg.fromSessionId, msg.sessionId);
+							const views = { ...s.views };
+							if (keepSource && sourceView) {
+								views[msg.fromSessionId] = { ...releaseProc(sourceView), readonly: true };
+								reloadSourceId = msg.fromSessionId;
+							} else {
+								delete views[msg.fromSessionId];
+							}
+							const targetExisting = views[msg.sessionId];
+							const nextProc =
+								sourceView && sourceView.proc !== "none" && sourceView.proc !== "exited" && sourceView.proc !== "crashed"
+									? sourceView.proc
+									: "ready";
+							views[msg.sessionId] = {
+								...(targetExisting ??
+									createSessionView(msg.sessionId, {
+										proc: nextProc,
+										title: sourceView?.title ?? sourceItem?.title,
+										approvalMode: sourceView?.approvalMode,
+										pendingApprovalMode: sourceView?.pendingApprovalMode,
+									})),
+								sessionId: msg.sessionId,
+								readonly: false,
+								proc: nextProc,
+								lastSeq: 0,
+								models: sourceView?.models ?? targetExisting?.models ?? [],
+								thinkingLevels: sourceView?.thinkingLevels ?? targetExisting?.thinkingLevels ?? [],
+								commands: sourceView?.commands ?? targetExisting?.commands ?? [],
+								state: sourceView?.state
+									? {
+											...sourceView.state,
+											sessionId: msg.sessionId,
+											...(msg.sessionFile !== undefined ? { sessionFile: msg.sessionFile } : {}),
+										}
+									: (targetExisting?.state ?? null),
+							};
+
+							const now = new Date().toISOString();
+							let sessions = keepSource
+								? s.sessions.map(it =>
+										it.id === msg.fromSessionId ? { ...it, live: false, running: false } : it,
+									)
+								: s.sessions.filter(it => it.id !== msg.fromSessionId);
+							if (sessions.some(it => it.id === msg.sessionId)) {
+								sessions = sessions.map(it =>
+									it.id === msg.sessionId
+										? { ...it, live: true, ...(msg.sessionFile !== undefined ? { file: msg.sessionFile } : {}) }
+										: it,
+								);
+							} else {
+								const placeholder: SessionListItem = {
+									id: msg.sessionId,
+									file: msg.sessionFile ?? "",
+									cwd: sourceItem?.cwd ?? "",
+									title: sourceView?.title ?? sourceItem?.title ?? "",
+									createdAt: now,
+									updatedAt: now,
+									sizeBytes: 0,
+									live: true,
+									running: false,
+									archived: false,
+								};
+								sessions = [placeholder, ...sessions];
+							}
+
+							return {
+								currentSessionId: s.currentSessionId === msg.fromSessionId ? msg.sessionId : s.currentSessionId,
+								composerInsert:
+									s.composerInsert?.sessionId === msg.fromSessionId
+										? { ...s.composerInsert, sessionId: msg.sessionId }
+										: s.composerInsert,
+								views,
+								sessions,
+							};
+						});
+						if (reloadSourceId && http) {
+							const srcId = reloadSourceId;
+							void http
+								.getTranscript(srcId)
+								.then(transcript => {
+									const messages = transcript.map((m): ViewMessage => ({ ...m, animateOnMount: false }));
+									updateView(srcId, v => (v.readonly ? { ...v, messages } : v));
+								})
+								.catch(() => undefined);
+						}
+						void get().coldStart(msg.sessionId);
+						void get().loadSessions();
+						break;
+					}
 					case "sessions_changed":
 						void get().loadSessions();
 						break;
@@ -524,20 +639,24 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				try {
 					const transcript = await http.getTranscript(item.id);
 					const messages = transcript.map((m): ViewMessage => ({ ...m, animateOnMount: false }));
-					set(s => ({
-						views: {
-							...s.views,
-							[item.id]: {
-								...createSessionView(item.id, {
-									readonly: true,
-									title: item.title,
-									// A permission picked on an earlier preview of this session survives the refresh.
-									...(existing?.approvalMode !== undefined ? { approvalMode: existing.approvalMode } : {}),
-								}),
-								messages,
+					set(s => {
+						const current = s.views[item.id];
+						if (current && !current.readonly && current.proc !== "none") return s;
+						return {
+							views: {
+								...s.views,
+								[item.id]: {
+									...createSessionView(item.id, {
+										readonly: true,
+										title: item.title,
+										// A permission picked on an earlier preview of this session survives the refresh.
+										...(existing?.approvalMode !== undefined ? { approvalMode: existing.approvalMode } : {}),
+									}),
+									messages,
+								},
 							},
-						},
-					}));
+						};
+					});
 				} catch (err) {
 					get().pushToast("error", err instanceof Error ? err.message : "无法加载会话");
 					return;
@@ -580,7 +699,7 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				const item = get().sessions.find(s => s.id === sessionId);
 				if (!item) throw new Error(`unknown session ${sessionId}`);
 				const task = (async () => {
-					await attachAndStart(sessionId, {
+					const currentId = await attachAndStart(sessionId, {
 						cwd: item.cwd,
 						resume: item.file,
 						restore: view.proc === "crashed",
@@ -588,7 +707,7 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 						thinking: get().config?.defaultThinking,
 						approvalMode: view.approvalMode ?? get().config?.defaultApprovalMode,
 					});
-					updateView(sessionId, v => ({ ...v, readonly: false, approvalMode: v.approvalMode ?? get().config?.defaultApprovalMode }));
+					updateView(currentId, v => ({ ...v, readonly: false, approvalMode: v.approvalMode ?? get().config?.defaultApprovalMode }));
 				})();
 				startingSessions.set(sessionId, task);
 				try {

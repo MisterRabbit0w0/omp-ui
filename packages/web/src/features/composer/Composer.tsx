@@ -252,6 +252,7 @@ export function Composer({
 		}
 		setText(composerInsert.text);
 		setCursor(composerInsert.text.length);
+		if (initialText === undefined) saveSessionDraft(sessionId, composerInsert.text);
 		useAppStore.setState({ composerInsert: null });
 		requestAnimationFrame(() => {
 			const el = textareaRef.current;

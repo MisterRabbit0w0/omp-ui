@@ -11,7 +11,7 @@ import type { ApprovalPrompt } from "@omp-ui/protocol";
 import { Ban, ChevronDown, Search, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../../store/app-store";
-import { approvalReceiptKind, type SubagentView, type ToolExec, type ToolGroup, type TurnTool } from "../../store/session-reducer";
+import { approvalReceiptKind, askSummaryLines, type SubagentView, type ToolExec, type ToolGroup, type TurnTool } from "../../store/session-reducer";
 import { Collapsible } from "../../ui/Collapsible";
 import { Icon, toolIcon } from "../../ui/Icon";
 import { ShimmerText } from "../../ui/ShimmerText";
@@ -19,6 +19,8 @@ import { Spinner } from "../../ui/Spinner";
 import { computeDiffFromOldNew, extractDiffSource, parseUnifiedDiffText } from "../tools/DiffView";
 import { getToolRowSummary, renderToolDetail, resolveToolRenderer, stripLineSelector } from "../tools/registry";
 import { ApprovalCard, ApprovalReceipt, type ApprovalReceiptState } from "./ApprovalCard";
+import { AskCard, AskSummary } from "./AskCard";
+import type { AnchoredAsk } from "./ask-anchor";
 
 export interface ToolRunGroupProps {
 	sessionId: string;
@@ -27,6 +29,7 @@ export interface ToolRunGroupProps {
 	toolExec: Map<string, ToolExec>;
 	subagents: Map<string, SubagentView>;
 	anchoredApprovals: Map<string, ApprovalPrompt[]>;
+	anchoredAsks: Map<string, AnchoredAsk[]>;
 	isTurnRunning: boolean;
 	focusedToolCallId?: string | null;
 }
@@ -267,6 +270,7 @@ function SingleToolRow({
 	toolExec,
 	subagents,
 	approvals,
+	asks,
 	focused,
 }: {
 	tool: TurnTool;
@@ -274,6 +278,7 @@ function SingleToolRow({
 	toolExec: Map<string, ToolExec>;
 	subagents: Map<string, SubagentView>;
 	approvals: ApprovalPrompt[];
+	asks: AnchoredAsk[];
 	focused: boolean;
 }) {
 	const exec = tool.exec ?? toolExec.get(tool.call.id);
@@ -446,6 +451,14 @@ function SingleToolRow({
 			))}
 			{approvals.length === 0 && receiptState !== undefined && <ApprovalReceipt state={receiptState} />}
 
+			{asks.map(ask =>
+				ask.entry ? (
+					<AskSummary key={ask.request.id} lines={askSummaryLines(ask.entry)} />
+				) : (
+					<AskCard key={ask.request.id} sessionId={sessionId} request={ask.request} />
+				),
+			)}
+
 			<Collapsible open={open} duration={300}>
 				<div className="my-0.5 ml-2 border-l border-line py-0.5 pl-3.5">
 					{renderToolDetail({
@@ -470,14 +483,16 @@ export function ToolRunGroup({
 	toolExec,
 	subagents,
 	anchoredApprovals,
+	anchoredAsks,
 	isTurnRunning,
 	focusedToolCallId,
 }: ToolRunGroupProps) {
 	const hasAnyError = tools.some(t => t.result?.isError || (t.exec ?? toolExec.get(t.call.id))?.status === "error");
 	const hasAnyApproval = tools.some(t => (anchoredApprovals.get(t.call.id)?.length ?? 0) > 0);
+	const hasPendingAsk = tools.some(t => (anchoredAsks.get(t.call.id) ?? []).some(a => !a.entry));
 	const rowCount = groups.length;
 
-	const [open, setOpen] = useState<boolean>(() => isTurnRunning || rowCount <= 4 || hasAnyError || hasAnyApproval);
+	const [open, setOpen] = useState<boolean>(() => isTurnRunning || rowCount <= 4 || hasAnyError || hasAnyApproval || hasPendingAsk);
 	const [showAllDiffChips, setShowAllDiffChips] = useState(false);
 	const userToggledRef = useRef(false);
 	const prevTurnRunningRef = useRef(isTurnRunning);
@@ -488,13 +503,13 @@ export function ToolRunGroup({
 			prevTurnRunningRef.current = isTurnRunning;
 			return;
 		}
-		if (isTurnRunning || hasAnyApproval || hasAnyError) {
+		if (isTurnRunning || hasAnyApproval || hasAnyError || hasPendingAsk) {
 			setOpen(true);
 		} else if (prevTurnRunningRef.current && !isTurnRunning && rowCount > 4) {
 			setOpen(false);
 		}
 		prevTurnRunningRef.current = isTurnRunning;
-	}, [isTurnRunning, rowCount, hasAnyApproval, hasAnyError]);
+	}, [isTurnRunning, rowCount, hasAnyApproval, hasAnyError, hasPendingAsk]);
 
 	useEffect(() => {
 		if (focusedToolCallId && tools.some(t => t.call.id === focusedToolCallId)) {
@@ -571,6 +586,7 @@ export function ToolRunGroup({
 									toolExec={toolExec}
 									subagents={subagents}
 									approvals={anchoredApprovals.get(single.call.id) ?? []}
+									asks={anchoredAsks.get(single.call.id) ?? []}
 									focused={focusedToolCallId === single.call.id}
 								/>
 							);

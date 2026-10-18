@@ -145,12 +145,11 @@ export function resolveUi(
 	const cleared = request.method === "input" && view.lastOpenUrl !== undefined ? { ...view, pendingUi, lastOpenUrl: undefined } : { ...view, pendingUi };
 	if (!isTrackedUiRequest(request)) return cleared;
 	let toolCallId: string | undefined;
-	if (isApprovalRequest(request)) {
-		const approval = parseApproval(request);
-		if (approval) {
-			for (const exec of view.toolExec.values()) {
-				if (exec.status === "running" && toolNamesMatch(exec.toolName, approval.toolName)) toolCallId = exec.toolCallId;
-			}
+	const approval = isApprovalRequest(request) ? parseApproval(request) : null;
+	const toolName = approval?.toolName ?? (request.method === "ask" ? "ask" : undefined);
+	if (toolName) {
+		for (const exec of view.toolExec.values()) {
+			if (exec.status === "running" && toolNamesMatch(exec.toolName, toolName)) toolCallId = exec.toolCallId;
 		}
 	}
 	const entry: AnsweredUi = { request, ...info, ...(toolCallId !== undefined ? { toolCallId } : {}) };

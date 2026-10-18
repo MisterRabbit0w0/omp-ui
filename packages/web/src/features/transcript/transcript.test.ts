@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ExtensionUiRequest, SessionEntries, ToolCall, ToolResultMessage } from "@omp-ui/protocol";
 import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createSessionView, reduce, selectTurns, type ToolExec } from "../../store/session-reducer";
+import { createSessionView, reduce, resolveUi, selectTurns, type ToolExec } from "../../store/session-reducer";
 import {
 	computeDiffFromOldNew,
 	extractDiffSource,
@@ -12,6 +12,7 @@ import {
 	TOOL_RENDERERS,
 } from "../tools";
 import { anchorApprovals } from "./approval-anchor";
+import { anchorAsks } from "./ask-anchor";
 import { matchBranchEntry, resolveActiveBranchUserEntries } from "./branch-match";
 import { splitStreamTail } from "./streaming-tail";
 
@@ -240,6 +241,59 @@ describe("anchorApprovals (§7.3 approval anchoring)", () => {
 		const anchored = anchorApprovals(turns, view.pendingUi, view.toolExec);
 		expect(anchored.byToolCallId.size).toBe(0);
 		expect(anchored.unanchored.length).toBe(1);
+	});
+});
+
+describe("anchorAsks (§6.8 inline ask position)", () => {
+	const askReq: ExtensionUiRequest = {
+		type: "extension_ui_request",
+		id: "ask-1",
+		method: "ask",
+		questions: [{ id: "q1", question: "Pick a color?", options: [{ label: "Red" }, { label: "Blue" }] }],
+	};
+	const askMessage = {
+		role: "assistant" as const,
+		content: [{ type: "toolCall" as const, id: "ask-call-1", name: "ask", arguments: {} }],
+		api: "fake",
+		provider: "fake",
+		model: "fake/model",
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "toolUse" as const,
+		timestamp: 1000,
+	};
+
+	function askView() {
+		let view = createSessionView("ask-session");
+		view = reduce(view, { type: "message_end", messageId: "m-ask", message: askMessage }, { live: true });
+		view = reduce(view, { type: "tool_execution_start", toolCallId: "ask-call-1", toolName: "ask", args: {} }, { live: true });
+		return view;
+	}
+
+	test("anchors a pending ask under its running ask tool call", () => {
+		const view = reduce(askView(), askReq, { live: true });
+		const anchored = anchorAsks(selectTurns(view), view.pendingUi, view.answeredUi, view.toolExec);
+		expect(anchored.unanchored).toHaveLength(0);
+		expect(anchored.byToolCallId.get("ask-call-1")?.[0]?.request.id).toBe("ask-1");
+	});
+
+	test("keeps the answered receipt under the same tool call", () => {
+		let view = reduce(askView(), askReq, { live: true });
+		view = resolveUi(view, "ask-1", {
+			response: { type: "extension_ui_response", id: "ask-1", answers: [{ id: "q1", selectedOptions: ["Blue"] }] },
+		});
+		view = reduce(view, { type: "tool_execution_end", toolCallId: "ask-call-1", toolName: "ask", result: { output: "ok" } }, { live: true });
+		const anchored = anchorAsks(selectTurns(view), view.pendingUi, view.answeredUi, view.toolExec);
+		expect(anchored.unanchored).toHaveLength(0);
+		expect(anchored.byToolCallId.get("ask-call-1")?.[0]?.entry?.response).toMatchObject({
+			answers: [{ id: "q1", selectedOptions: ["Blue"] }],
+		});
+	});
+
+	test("falls back to the transcript tail when no ask tool row exists", () => {
+		const view = reduce(createSessionView("ask-only"), askReq, { live: true });
+		const anchored = anchorAsks(selectTurns(view), view.pendingUi, view.answeredUi, view.toolExec);
+		expect(anchored.byToolCallId.size).toBe(0);
+		expect(anchored.unanchored).toHaveLength(1);
 	});
 });
 

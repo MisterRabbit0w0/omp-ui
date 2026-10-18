@@ -39,6 +39,7 @@ import { Icon } from "../../ui/Icon";
 import { Tooltip } from "../../ui/Tooltip";
 import { CodeBlock } from "../tools/CodeBlock";
 import { Prose } from "./Prose";
+import type { AnchoredAsk } from "./ask-anchor";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolRunGroup } from "./ToolRunGroup";
 
@@ -48,6 +49,7 @@ export interface AssistantTurnViewProps {
 	toolExec: Map<string, ToolExec>;
 	subagents: Map<string, SubagentView>;
 	anchoredApprovals: Map<string, ApprovalPrompt[]>;
+	anchoredAsks: Map<string, AnchoredAsk[]>;
 	isTurnRunning: boolean;
 	animateOnMount?: boolean;
 	focusedToolCallId?: string | null;
@@ -59,6 +61,7 @@ export interface DraftTurnViewProps {
 	toolExec: Map<string, ToolExec>;
 	subagents: Map<string, SubagentView>;
 	anchoredApprovals: Map<string, ApprovalPrompt[]>;
+	anchoredAsks: Map<string, AnchoredAsk[]>;
 	focusedToolCallId?: string | null;
 }
 
@@ -193,6 +196,7 @@ export function AssistantTurnView({
 	toolExec,
 	subagents,
 	anchoredApprovals,
+	anchoredAsks,
 	isTurnRunning,
 	animateOnMount = false,
 	focusedToolCallId,
@@ -286,6 +290,7 @@ export function AssistantTurnView({
 							toolExec={toolExec}
 							subagents={subagents}
 							anchoredApprovals={anchoredApprovals}
+							anchoredAsks={anchoredAsks}
 							isTurnRunning={isTurnRunning}
 							focusedToolCallId={focusedToolCallId}
 						/>
@@ -365,6 +370,7 @@ export function DraftTurnView({
 	toolExec,
 	subagents,
 	anchoredApprovals,
+	anchoredAsks,
 	focusedToolCallId,
 }: DraftTurnViewProps) {
 	const blocks = draft.content.filter((b): b is AssistantContent => Boolean(b));
@@ -419,6 +425,7 @@ export function DraftTurnView({
 					toolExec={toolExec}
 					subagents={subagents}
 					anchoredApprovals={anchoredApprovals}
+					anchoredAsks={anchoredAsks}
 					isTurnRunning={!draft.done}
 					focusedToolCallId={focusedToolCallId}
 				/>

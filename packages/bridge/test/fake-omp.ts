@@ -288,22 +288,44 @@ const runRichPrompt = async (commandId: unknown, message: string): Promise<void>
 		emit({ type: "message_end", messageId, message: final });
 		persist(final);
 	} else if (message.includes("ASK")) {
-		const final = richAssistant([{ type: "text", text }], "stop");
-		update({ type: "done", reason: "stop", message: final });
+		const question = { id: "q1", question: "Pick a color?", options: [{ label: "Red" }, { label: "Blue" }], recommended: 0 };
+		const toolCall = { id: `call-${messageSeq}`, name: "ask", arguments: { questions: [question] } };
+		const final = richAssistant([{ type: "text", text }, { type: "toolCall", ...toolCall }], "toolUse");
+		update({ type: "done", reason: "toolUse", message: final });
 		emit({ type: "message_end", messageId, message: final });
 		persist(final);
+		emit({ type: "tool_execution_start", toolCallId: toolCall.id, toolName: "ask", args: toolCall.arguments });
 		const uiId = `ui-${++uiSeq}`;
 		const answered = waitUi(uiId);
 		emit({
 			type: "extension_ui_request",
 			id: uiId,
 			method: "ask",
-			questions: [{ id: "q1", question: "Pick a color?", options: [{ label: "Red" }, { label: "Blue" }], recommended: 0 }],
+			questions: [question],
 		});
 		const response = await answered;
 		const answers = Array.isArray(response.answers) ? (response.answers as { selectedOptions?: string[] }[]) : [];
 		const chosen = answers[0]?.selectedOptions?.join(",") ?? "(cancelled)";
-		const reply = richAssistant([{ type: "text", text: `you chose: ${chosen}` }], "stop");
+		const resultText = `you chose: ${chosen}`;
+		emit({
+			type: "tool_execution_end",
+			toolCallId: toolCall.id,
+			toolName: "ask",
+			result: { content: [{ type: "text", text: resultText }], details: { answers } },
+		});
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: "ask",
+			content: [{ type: "text", text: resultText }],
+			details: { answers },
+			isError: false,
+			timestamp: Date.now(),
+		};
+		emit({ type: "message_start", messageId: `${messageId}-r`, message: toolResult });
+		emit({ type: "message_end", messageId: `${messageId}-r`, message: toolResult });
+		persist(toolResult);
+		const reply = richAssistant([{ type: "text", text: resultText }], "stop");
 		emit({ type: "message_start", messageId: `${messageId}-2`, message: reply });
 		emit({ type: "message_end", messageId: `${messageId}-2`, message: reply });
 		persist(reply);

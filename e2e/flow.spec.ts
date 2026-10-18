@@ -119,13 +119,16 @@ test("B1: denied approval keeps the 已拒绝 receipt after reload", async ({ ap
 
 test("B1/M6: ask answer leaves a summary, and reload does not resurrect the ask card", async ({ app }) => {
 	await send(app, "ASK me");
+	// The questionnaire is anchored under its ask tool call, not pinned to the transcript tail.
+	const askRow = app.locator("[data-tool-call-id]").filter({ has: app.getByText("Pick a color?") });
+	await expect(askRow).toHaveCount(1);
 	await app.getByText("Blue", { exact: true }).click();
 	const submit = app.getByRole("button", { name: "提交回答" });
 	if (await submit.isVisible().catch(() => false)) await submit.click();
 	await expect(text(app, "you chose: Blue")).toBeVisible();
 	// M6: summary stays in the transcript after the card is gone
-	await expect(app.getByTestId("ask-summary")).toContainText("Pick a color?");
-	await expect(app.getByTestId("ask-summary")).toContainText("Blue");
+	await expect(askRow.getByTestId("ask-summary")).toContainText("Pick a color?");
+	await expect(askRow.getByTestId("ask-summary")).toContainText("Blue");
 
 	await app.reload();
 	await expect(app.getByText("已连接")).toBeVisible();
@@ -133,5 +136,7 @@ test("B1/M6: ask answer leaves a summary, and reload does not resurrect the ask 
 	await expect(text(app, "you chose: Blue")).toBeVisible();
 	await expect(app.getByRole("button", { name: "提交回答" })).toHaveCount(0);
 	await expect(app.getByText("等待你的回应")).toHaveCount(0);
-	await expect(app.getByTestId("ask-summary")).toContainText("Pick a color?");
+	const replayedAskRow = app.locator("[data-tool-call-id]").filter({ has: app.getByText("Pick a color?") });
+	await expect(replayedAskRow).toHaveCount(1);
+	await expect(replayedAskRow.getByTestId("ask-summary")).toContainText("Pick a color?");
 });

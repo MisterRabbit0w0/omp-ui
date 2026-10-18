@@ -94,7 +94,7 @@ omp-ui/
 - 一个打开的会话对应一个 `omp --mode rpc-ui` 子进程，以 `sessionId` 为键。
 - 新会话：`omp --mode rpc-ui --cwd <dir> [--model p/id] [--thinking L] [--approval-mode M]`。
 - 恢复会话：追加 `--resume <sessionFile>`。崩溃恢复用 `--restore <sessionFile>`。
-- 只读预览先展示、进程随即预热：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史，前端随后在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"）。模型/思考级别选择器在发送前即可用；首次发送复用同一个进程。
+- 只读预览先展示、按需启动：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史，此时不 spawn（浏览侧边栏不占进程池、不触发 LRU 回收）。打开模型/思考级别菜单时前端在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"），因此发送前即可切换模型；首次发送复用同一个进程，未打开菜单则在发送时启动。
 - 进程池上限默认 6。超限时回收最久未用、`isSettled=true` 且无待答 UI 请求的进程（`SIGTERM`，5 秒后 `SIGKILL`）。正在流式输出或有待答请求的进程永不回收。
 - `omp` 可执行路径：`OMP_UI_OMP_BIN` > `Bun.which("omp")`。启动时运行 `omp --version`，低于 18.11.0 拒绝并提示。
 - stderr 收集到每进程 200KB 环形缓冲，在「诊断」面板可看。

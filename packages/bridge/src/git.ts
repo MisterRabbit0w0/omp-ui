@@ -65,8 +65,12 @@ async function runGit(cwd: string, args: string[]): Promise<GitRun | null> {
 	}
 	const outcome = await Promise.race([
 		(async () => {
-			const [stdout, code] = await Promise.all([readCapped(proc.stdout, MAX_DIFF_BYTES), proc.exited]);
-			return { stdout, code };
+			const stdout = await readCapped(proc.stdout, MAX_DIFF_BYTES);
+			// Hitting the cap closes the pipe while git may still be writing; stop it so `exited` settles
+			// promptly, and keep the captured prefix (git's SIGPIPE/kill exit code says nothing about it).
+			if (stdout.truncated) proc.kill();
+			const code = await proc.exited;
+			return { stdout, code: stdout.truncated ? 0 : code };
 		})(),
 		Bun.sleep(GIT_TIMEOUT_MS).then(() => null),
 	]);
@@ -77,37 +81,82 @@ async function runGit(cwd: string, args: string[]): Promise<GitRun | null> {
 	return { code: outcome.code, stdout: outcome.stdout.text, truncated: outcome.stdout.truncated };
 }
 
-/** Decode a git C-quoted path ("a/foo\tbar") and drop the a//b/ prefix. */
+const SIMPLE_ESCAPES: Record<string, number> = { n: 10, t: 9, r: 13, b: 8, f: 12, v: 11, a: 7 };
+
+/**
+ * Decode a git C-quoted string body (without the surrounding quotes). Octal escapes are raw bytes of a
+ * UTF-8 path, so bytes are accumulated and decoded together (`\344\270\255` → 中).
+ */
+function unquoteGitPath(body: string): string {
+	const encoder = new TextEncoder();
+	const bytes: number[] = [];
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i]!;
+		if (ch !== "\\") {
+			for (const b of encoder.encode(ch)) bytes.push(b);
+			continue;
+		}
+		const next = body[++i] ?? "";
+		if (/[0-7]/.test(next)) {
+			let oct = next;
+			while (oct.length < 3 && /[0-7]/.test(body[i + 1] ?? "")) oct += body[++i];
+			bytes.push(Number.parseInt(oct, 8) & 0xff);
+		} else if (next in SIMPLE_ESCAPES) {
+			bytes.push(SIMPLE_ESCAPES[next]!);
+		} else {
+			for (const b of encoder.encode(next)) bytes.push(b);
+		}
+	}
+	return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/** Decode a possibly C-quoted patch path ("a/foo\tbar") and drop the a/ / b/ prefix. */
 function normalizePatchPath(raw: string): string | undefined {
-	const trimmed = raw.replace(/\t.*$/, "").trim();
+	const trimmed = raw.startsWith('"') ? raw.trim() : raw.replace(/\t.*$/, "").trim();
 	if (!trimmed || trimmed === "/dev/null") return undefined;
-	let value: string;
-	if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-		let out = "";
-		for (let i = 1; i < trimmed.length - 1; i++) {
-			const ch = trimmed[i]!;
-			if (ch !== "\\") {
-				out += ch;
+	const value =
+		trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2
+			? unquoteGitPath(trimmed.slice(1, -1))
+			: trimmed;
+	return value.replace(/^[ab]\//, "");
+}
+
+/** Split one leading (possibly quoted) token off `text`: returns [token, rest]. */
+function takeToken(text: string): [string, string] | null {
+	if (text.startsWith('"')) {
+		for (let i = 1; i < text.length; i++) {
+			if (text[i] === "\\") {
+				i++;
 				continue;
 			}
-			const next = trimmed[++i] ?? "";
-			if (next === "n") out += "\n";
-			else if (next === "t") out += "\t";
-			else if (next === "r") out += "\r";
-			else if (next === "b") out += "\b";
-			else if (next === "f") out += "\f";
-			else if (next === "v") out += "\v";
-			else if (/[0-7]/.test(next)) {
-				let oct = next;
-				while (oct.length < 3 && /[0-7]/.test(trimmed[i + 1] ?? "")) oct += trimmed[++i];
-				out += String.fromCharCode(Number.parseInt(oct, 8));
-			} else out += next;
+			if (text[i] === '"') return [text.slice(0, i + 1), text.slice(i + 1).replace(/^ /, "")];
 		}
-		value = out;
-	} else {
-		value = trimmed;
+		return null;
 	}
-	return value.replace(/^[ab]\//, "");
+	return null;
+}
+
+/**
+ * Path from a `diff --git a/X b/Y` header (b side). Header-only patches (binary, mode-only) have no
+ * `---`/`+++` lines, so this is their only source. Unquoted paths may contain spaces; when both sides are
+ * the same path the header is split in the middle, otherwise at the last " b/".
+ */
+export function pathFromDiffHeader(line: string): string | undefined {
+	const rest = line.slice("diff --git ".length);
+	const first = takeToken(rest);
+	if (first) {
+		const second = takeToken(first[1]);
+		return normalizePatchPath(second ? second[0] : first[1]);
+	}
+	if (rest.startsWith("a/") && rest.length % 2 === 1) {
+		const half = (rest.length - 1) / 2;
+		const a = rest.slice(2, half);
+		if (rest.slice(half) === ` b/${a}`) return a || undefined;
+	}
+	const cut = rest.lastIndexOf(" b/");
+	if (cut >= 0) return normalizePatchPath(rest.slice(cut + 1));
+	if (rest.lastIndexOf(' "b/') >= 0) return normalizePatchPath(rest.slice(rest.lastIndexOf(' "b/') + 1));
+	return undefined;
 }
 
 interface ParsedDiffFile {
@@ -115,31 +164,67 @@ interface ParsedDiffFile {
 	status: string;
 	lines: string[];
 	binary: boolean;
+	additions: number;
+	deletions: number;
 }
 
-function parseDiffFiles(diffText: string): ParsedDiffFile[] {
+/**
+ * Split `git diff` output per file. Hunk bodies are consumed by the line counts in their `@@` header, so
+ * content lines that look like headers (a removed `-- comment` is `--- comment`, an added `++x` is `+++x`)
+ * are never mistaken for `---`/`+++` file headers and are always counted.
+ */
+export function parseDiffFiles(diffText: string): ParsedDiffFile[] {
 	const files: ParsedDiffFile[] = [];
 	let current: ParsedDiffFile | null = null;
+	let headerPath: string | undefined;
 	let renameTo: string | undefined;
+	let oldLeft = 0;
+	let newLeft = 0;
 
 	const flush = (): void => {
 		if (current) {
-			if (!current.path && renameTo) current.path = renameTo;
+			if (!current.path) current.path = renameTo ?? headerPath;
 			if (current.path) files.push(current);
 		}
 		current = null;
+		headerPath = undefined;
 		renameTo = undefined;
+		oldLeft = 0;
+		newLeft = 0;
 	};
 
-	for (const line of diffText.split("\n")) {
+	const lines = diffText.split("\n");
+	if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	for (const line of lines) {
+		if (current && (oldLeft > 0 || newLeft > 0)) {
+			current.lines.push(line);
+			if (line.startsWith("+")) {
+				current.additions++;
+				newLeft--;
+			} else if (line.startsWith("-")) {
+				current.deletions++;
+				oldLeft--;
+			} else if (line.startsWith("\\")) {
+				// "\ No newline at end of file": consumes neither side
+			} else {
+				oldLeft--;
+				newLeft--;
+			}
+			continue;
+		}
 		if (line.startsWith("diff --git ")) {
 			flush();
-			current = { status: "M", lines: [line], binary: false };
+			current = { status: "M", lines: [line], binary: false, additions: 0, deletions: 0 };
+			headerPath = pathFromDiffHeader(line);
 			continue;
 		}
 		if (!current) continue;
 		current.lines.push(line);
-		if (line.startsWith("new file mode")) current.status = "A";
+		const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+		if (hunk) {
+			oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+			newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+		} else if (line.startsWith("new file mode")) current.status = "A";
 		else if (line.startsWith("deleted file mode")) current.status = "D";
 		else if (line.startsWith("rename to ")) {
 			renameTo = normalizePatchPath(line.slice("rename to ".length));
@@ -161,28 +246,28 @@ function parseDiffFiles(diffText: string): ParsedDiffFile[] {
 	return files;
 }
 
-function countDiffLines(lines: readonly string[]): { additions: number; deletions: number } {
-	let additions = 0;
-	let deletions = 0;
-	for (const line of lines) {
-		if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-		else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
-	}
-	return { additions, deletions };
-}
-
-async function untrackedFiles(cwd: string, root: string): Promise<{ files: GitChangedFile[]; truncated: boolean }> {
-	const listing = await runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
+/**
+ * Untracked files of the whole work tree (listed from `root`, so a session opened in a subdirectory still
+ * sees sibling/root files, matching `git diff`). `maxFiles` is the capacity left after tracked changes and
+ * `maxBytes` bounds the total content read, so the combined response stays within the advertised caps.
+ */
+async function untrackedFiles(
+	root: string,
+	maxFiles: number,
+	maxBytes: number,
+): Promise<{ files: GitChangedFile[]; truncated: boolean }> {
+	const listing = await runGit(root, ["ls-files", "--others", "--exclude-standard", "-z"]);
 	if (!listing || listing.code !== 0) return { files: [], truncated: false };
 	const files: GitChangedFile[] = [];
-	let truncated = false;
+	let truncated = listing.truncated;
+	let bytesLeft = maxBytes;
 	for (const rel of listing.stdout.split("\0")) {
 		if (!rel) continue;
-		if (files.length >= MAX_FILES) {
+		if (files.length >= maxFiles || bytesLeft <= 0) {
 			truncated = true;
 			break;
 		}
-		const absolute = path.join(cwd, rel);
+		const absolute = path.join(root, rel);
 		let stat: fs.Stats;
 		try {
 			// lstat: never follow a symlink out of the working tree while reading untracked content.
@@ -197,10 +282,12 @@ async function untrackedFiles(cwd: string, root: string): Promise<{ files: GitCh
 		} catch {
 			continue;
 		}
-		if (content.byteLength > MAX_UNTRACKED_BYTES) {
-			content = content.subarray(0, MAX_UNTRACKED_BYTES);
+		const cap = Math.min(MAX_UNTRACKED_BYTES, bytesLeft);
+		if (content.byteLength > cap) {
+			content = content.subarray(0, cap);
 			truncated = true;
 		}
+		bytesLeft -= content.byteLength;
 		const displayPath = path.relative(root, absolute).split("\\").join("/");
 		if (content.subarray(0, Math.min(content.byteLength, 8_000)).includes(0)) {
 			files.push({ path: displayPath, status: "?", additions: 0, deletions: 0, diff: "", binary: true });
@@ -225,7 +312,7 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 	const root = rootRun?.code === 0 ? rootRun.stdout.trim() : "";
 	if (!root) return { repo: false, scope, files: [] };
 
-	const diffRun = await runGit(cwd, [
+	const diffRun = await runGit(root, [
 		"diff",
 		...(scope === "staged" ? ["--cached"] : []),
 		"--no-color",
@@ -234,18 +321,15 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 		"--find-renames",
 		"--unified=3",
 	]);
-	if (!diffRun || diffRun.code !== 0) {
-		return { repo: true, root, scope, files: [], ...(diffRun?.truncated ? { truncated: true } : {}) };
-	}
+	if (!diffRun || diffRun.code !== 0) return { repo: true, root, scope, files: [] };
 
 	const parsed = parseDiffFiles(diffRun.stdout);
 	const files: GitChangedFile[] = parsed.slice(0, MAX_FILES).map(file => {
-		const { additions, deletions } = countDiffLines(file.lines);
 		return {
 			path: file.path!,
 			status: file.status,
-			additions,
-			deletions,
+			additions: file.additions,
+			deletions: file.deletions,
 			diff: file.lines.join("\n"),
 			...(file.binary ? { binary: true } : {}),
 		};
@@ -253,7 +337,8 @@ export async function readGitChanges(cwd: string, scope: GitChangeScope): Promis
 	let truncated = diffRun.truncated || parsed.length > files.length;
 
 	if (scope === "unstaged") {
-		const untracked = await untrackedFiles(cwd, root);
+		const usedBytes = files.reduce((sum, file) => sum + file.diff.length, 0);
+		const untracked = await untrackedFiles(root, MAX_FILES - files.length, MAX_DIFF_BYTES - usedBytes);
 		files.push(...untracked.files);
 		truncated = truncated || untracked.truncated;
 	}

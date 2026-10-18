@@ -11,7 +11,7 @@ import type { ApprovalPrompt } from "@omp-ui/protocol";
 import { Ban, ChevronDown, Search, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../../store/app-store";
-import { approvalReceiptKind, askSummaryLines, type SubagentView, type ToolExec, type ToolGroup, type TurnTool } from "../../store/session-reducer";
+import { answeredApprovalFor, approvalReceiptKind, askSummaryLines, type SubagentView, type ToolExec, type ToolGroup, type TurnTool } from "../../store/session-reducer";
 import { Collapsible } from "../../ui/Collapsible";
 import { Icon, toolIcon } from "../../ui/Icon";
 import { ShimmerText } from "../../ui/ShimmerText";
@@ -287,7 +287,7 @@ function SingleToolRow({
 	const [localReceipt, setReceiptState] = useState<ApprovalReceiptState | undefined>(undefined);
 	// Durable receipt: survives remounts (virtualization), other-tab answers and reload replay.
 	const answered = useAppStore(s => s.views[sessionId]?.answeredUi);
-	const answeredEntry = answered?.findLast(a => a.toolCallId === tool.call.id);
+	const answeredEntry = answeredApprovalFor(answered, tool.call.id);
 	const durableReceipt = answeredEntry ? approvalReceiptKind(answeredEntry, tool.result) : undefined;
 	const receiptState: ApprovalReceiptState | undefined = localReceipt ?? durableReceipt;
 	const isDenied = isDeniedToolResult(tool, receiptState);

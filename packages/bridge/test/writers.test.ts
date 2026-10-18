@@ -28,6 +28,35 @@ describe("ConfigStore with two bridges on one config dir", () => {
 		expect(store.config.archived).toEqual(["s1"]);
 	});
 
+	test("concurrent writers in separate processes never drop each other's archive", async () => {
+		const dir = tempDir("cfg-procs");
+		new ConfigStore(dir).update({});
+		const configModule = path.resolve(import.meta.dir, "../src/config.ts");
+		const script = (id: string) =>
+			`import { ConfigStore } from ${JSON.stringify(configModule)};
+			const s = new ConfigStore(${JSON.stringify(dir)});
+			for (let i = 0; i < 20; i++) s.archive(${JSON.stringify(id)} + "-" + i);`;
+		const procs = ["a", "b", "c", "d"].map(id =>
+			Bun.spawn([process.execPath, "-e", script(id)], { stdout: "ignore", stderr: "inherit" }),
+		);
+		expect(await Promise.all(procs.map(p => p.exited))).toEqual([0, 0, 0, 0]);
+		const archived = new ConfigStore(dir).config.archived;
+		expect(archived).toHaveLength(80);
+		expect(fs.existsSync(path.join(dir, "config.json.lock"))).toBe(false);
+	});
+
+	test("a stale lock left by a crashed writer is taken over", () => {
+		const dir = tempDir("cfg-stale");
+		const store = new ConfigStore(dir);
+		const lock = path.join(dir, "config.json.lock");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(lock, "999999");
+		const old = new Date(Date.now() - 60_000);
+		fs.utimesSync(lock, old, old);
+		store.archive("s1");
+		expect(store.config.archived).toEqual(["s1"]);
+	});
+
 	test("saves leave no temp files behind", () => {
 		const dir = tempDir("cfg-tmp");
 		const store = new ConfigStore(dir);
@@ -46,5 +75,13 @@ describe("modelConfigFingerprint", () => {
 		expect(afterConfig).not.toBe(empty);
 		fs.writeFileSync(path.join(dir, "models.yml"), "providers: {}\n");
 		expect(modelConfigFingerprint(dir)).not.toBe(afterConfig);
+	});
+
+	test("ignores agent.db churn from ordinary session activity", () => {
+		const dir = tempDir("fp-agentdb");
+		const before = modelConfigFingerprint(dir);
+		fs.writeFileSync(path.join(dir, "agent.db"), "x");
+		fs.writeFileSync(path.join(dir, "agent.db-wal"), "y");
+		expect(modelConfigFingerprint(dir)).toBe(before);
 	});
 });

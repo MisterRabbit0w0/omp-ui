@@ -2,6 +2,7 @@ import { ChevronDown, ExternalLink, FileText, RefreshCw, WrapText } from "lucide
 import { useEffect, useMemo, useState } from "react";
 import type { GitChangesResult } from "@omp-ui/protocol";
 import { DiffView } from "@/features/tools/DiffView";
+import { onGitChanged } from "@/lib/git-events";
 import { useAppStore } from "@/store/app-store";
 import { getBridge } from "@/store/bridge-access";
 import type { SessionView } from "@/store/session-reducer";
@@ -80,8 +81,13 @@ export function ChangesTab({ view, focusedFilePath }: ChangesTabProps) {
 	);
 	const isGitScope = scope === "unstaged" || scope === "staged";
 
+	// A branch switch from the composer rewrites the work tree: refresh the snapshot. Different sessions may
+	// spell the same repo differently, so any switch refreshes (it is a cheap read).
+	useEffect(() => onGitChanged(() => setRefreshToken(token => token + 1)), []);
+
 	// Git snapshots change outside the event stream (the agent, an editor, another shell):
-	// refresh on scope/run settles, on an explicit click, and when the working directory changes.
+	// refresh on scope/run start/settle, on an explicit click, and when the working directory changes.
+	// Not per message: a busy run would re-run `git diff` on every streamed message.
 	useEffect(() => {
 		if (!isGitScope) return;
 		if (!cwd) {
@@ -103,7 +109,7 @@ export function ChangesTab({ view, focusedFilePath }: ChangesTabProps) {
 		return () => {
 			cancelled = true;
 		};
-	}, [isGitScope, scope, cwd, refreshToken, view?.run.kind, view?.messages.length]);
+	}, [isGitScope, scope, cwd, refreshToken, view?.run.kind]);
 
 	// Ignore a snapshot from another scope/cwd during the frame before the new fetch lands.
 	const activeGitResult =

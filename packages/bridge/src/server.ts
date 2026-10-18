@@ -13,6 +13,7 @@ import type {
 	C2B,
 	Diagnostics,
 	ExtensionUiRequest,
+	GitBranchesResult,
 	RpcServerFrame,
 	UiConfig,
 } from "@omp-ui/protocol";
@@ -108,6 +109,17 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	await config.purgeTrash();
 	const modelCatalog = new ModelCatalog(ompCommand, options.agentDir ?? defaultAgentDir());
 	const pool = new ProcessPool<OmpProcess>(options.poolMax);
+
+	/** True when a live process whose cwd resolves to `dir` is mid-run. */
+	const runningInWorkspace = async (dir: string): Promise<boolean> => {
+		for (const key of pool.keys()) {
+			const proc = pool.peek(key);
+			if (!proc || proc.settled) continue;
+			const procDir = await fs.promises.realpath(proc.options.cwd).catch(() => proc.options.cwd);
+			if (procDir === dir) return true;
+		}
+		return false;
+	};
 	const scanner = new SessionScanner({
 		...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}),
 		isLive: id => pool.has(id),
@@ -395,33 +407,47 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			if (cwd.length === 0) return errorJson(400, "cwd is required");
 			return json(await searchFiles(cwd, url.searchParams.get("q") ?? ""));
 		}
-		if (req.method === "GET" && url.pathname === "/api/git/changes") {
-			const cwd = url.searchParams.get("cwd") ?? "";
-			if (cwd.length === 0) return errorJson(400, "cwd is required");
-			const scope = url.searchParams.get("scope") === "staged" ? "staged" : "unstaged";
-			try {
-				return json(await readGitChanges(cwd, scope));
-			} catch (error) {
-				return errorJson(502, (error as Error).message);
+		if (url.pathname.startsWith("/api/git/")) {
+			// One validation for every git endpoint: an existing absolute directory, canonicalized. Same trust
+			// model as /api/files (token-gated, any local workspace), so a freshly picked project without
+			// session files works too.
+			const body =
+				req.method === "POST" ? ((await req.json().catch(() => null)) as { cwd?: unknown; branch?: unknown } | null) : null;
+			const rawCwd = req.method === "POST" ? (typeof body?.cwd === "string" ? body.cwd : "") : (url.searchParams.get("cwd") ?? "");
+			if (rawCwd.length === 0) return errorJson(400, "cwd is required");
+			const workspace = await resolveWorkspaceDir(rawCwd);
+			if (!workspace.ok) {
+				// The branch picker probes every session's cwd; a deleted project is simply "not a repo".
+				if (workspace.status === 404 && req.method === "GET" && url.pathname === "/api/git/branches") {
+					return json({ repo: false, current: null, branches: [] } satisfies GitBranchesResult);
+				}
+				return errorJson(workspace.status, workspace.error);
 			}
-		}
-		if (req.method === "GET" && url.pathname === "/api/git/branches") {
-			const cwd = url.searchParams.get("cwd") ?? "";
-			if (cwd.length === 0) return errorJson(400, "cwd is required");
-			return json(await listGitBranches(cwd));
-		}
-		if (req.method === "POST" && url.pathname === "/api/git/switch") {
-			const body = (await req.json().catch(() => null)) as { cwd?: unknown; branch?: unknown } | null;
-			const cwd = typeof body?.cwd === "string" ? body.cwd : "";
-			const branch = typeof body?.branch === "string" ? body.branch : "";
-			if (cwd.length === 0 || branch.length === 0) return errorJson(400, "cwd and branch are required");
-			// Writes to the working tree: only known workspaces, and never under a running agent (it would edit files mid-switch).
-			const known = (await scanner.scan()).filter(item => item.cwd === cwd);
-			if (known.length === 0) return errorJson(403, "cwd is not a known workspace");
-			if (known.some(item => item.running)) return errorJson(409, "a session in this workspace is running; wait for it to finish");
-			const result = await switchGitBranch(cwd, branch);
-			if (!result.ok) return errorJson(result.status, result.error);
-			return json(await listGitBranches(cwd));
+			const cwd = workspace.dir;
+
+			if (req.method === "GET" && url.pathname === "/api/git/changes") {
+				const scope = url.searchParams.get("scope") === "staged" ? "staged" : "unstaged";
+				try {
+					return json(await readGitChanges(cwd, scope));
+				} catch (error) {
+					return errorJson(502, (error as Error).message);
+				}
+			}
+			if (req.method === "GET" && url.pathname === "/api/git/branches") {
+				return json(await listGitBranches(cwd));
+			}
+			if (req.method === "POST" && url.pathname === "/api/git/switch") {
+				const branch = typeof body?.branch === "string" ? body.branch : "";
+				if (branch.length === 0) return errorJson(400, "cwd and branch are required");
+				// Writes to the working tree: never under a running agent (it would edit files mid-switch).
+				if (await runningInWorkspace(cwd)) {
+					return errorJson(409, "a session in this workspace is running; wait for it to finish");
+				}
+				const result = await switchGitBranch(cwd, branch);
+				if (!result.ok) return errorJson(result.status, result.error);
+				return json(await listGitBranches(cwd));
+			}
+			return errorJson(404, "not found");
 		}
 		if (req.method === "GET" && url.pathname === "/api/file") {
 			const cwd = url.searchParams.get("cwd") ?? "";
@@ -638,4 +664,18 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			await pool.stopAll();
 		},
 	};
+}
+
+type WorkspaceDir = { ok: true; dir: string } | { ok: false; status: 400 | 404; error: string };
+
+/** Canonical absolute directory for a git endpoint, or the HTTP error to return. */
+export async function resolveWorkspaceDir(raw: string): Promise<WorkspaceDir> {
+	if (!path.isAbsolute(raw)) return { ok: false, status: 400, error: "cwd must be an absolute path" };
+	try {
+		const dir = await fs.promises.realpath(raw);
+		if (!(await fs.promises.stat(dir)).isDirectory()) return { ok: false, status: 400, error: "cwd is not a directory" };
+		return { ok: true, dir };
+	} catch {
+		return { ok: false, status: 404, error: `no such directory: ${raw}` };
+	}
 }

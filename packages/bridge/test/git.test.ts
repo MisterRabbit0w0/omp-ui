@@ -83,6 +83,72 @@ describe("readGitChanges", () => {
 	});
 });
 
+describe("readGitChanges edge cases", () => {
+	function committed(files: Record<string, string | Buffer>): string {
+		const cwd = initRepo();
+		for (const [name, content] of Object.entries(files)) {
+			fs.mkdirSync(path.dirname(path.join(cwd, name)), { recursive: true });
+			fs.writeFileSync(path.join(cwd, name), content);
+		}
+		git(cwd, "add", "-A");
+		git(cwd, "commit", "-m", "initial");
+		return cwd;
+	}
+
+	test("a diff over the byte cap keeps the captured prefix instead of returning nothing", async () => {
+		const cwd = committed({ "big.txt": "seed\n" });
+		fs.writeFileSync(path.join(cwd, "big.txt"), `${"x".repeat(100)}\n`.repeat(50_000));
+		const result = await readGitChanges(cwd, "staged").then(() => readGitChanges(cwd, "unstaged"));
+		expect(result.truncated).toBe(true);
+		expect(result.files.map(f => f.path)).toContain("big.txt");
+	});
+
+	test("header-only patches (modified binary, mode change) keep their path", async () => {
+		const cwd = committed({ "img.bin": Buffer.from([0, 1, 2, 3]), "run.sh": "echo hi\n" });
+		fs.writeFileSync(path.join(cwd, "img.bin"), Buffer.from([0, 9, 9, 9]));
+		git(cwd, "config", "core.fileMode", "true");
+		fs.chmodSync(path.join(cwd, "run.sh"), 0o755);
+		const result = await readGitChanges(cwd, "unstaged");
+		const img = result.files.find(f => f.path === "img.bin");
+		expect(img?.binary).toBe(true);
+		if (process.platform !== "win32") expect(result.files.map(f => f.path)).toContain("run.sh");
+	});
+
+	test("non-ASCII paths are decoded as UTF-8", async () => {
+		const cwd = committed({ "中文.txt": "一\n" });
+		fs.writeFileSync(path.join(cwd, "中文.txt"), "一\n二\n");
+		const result = await readGitChanges(cwd, "unstaged");
+		expect(result.files.map(f => f.path)).toEqual(["中文.txt"]);
+	});
+
+	test("content lines that look like ---/+++ headers are counted, not parsed as headers", async () => {
+		const cwd = committed({ "q.sql": "-- old comment\nselect 1;\n" });
+		fs.writeFileSync(path.join(cwd, "q.sql"), "++ added\nselect 1;\n");
+		const result = await readGitChanges(cwd, "unstaged");
+		expect(result.files).toHaveLength(1);
+		expect(result.files[0]).toMatchObject({ path: "q.sql", additions: 1, deletions: 1 });
+	});
+
+	test("a session in a subdirectory still sees untracked files at the repo root", async () => {
+		const cwd = committed({ "sub/keep.txt": "k\n" });
+		fs.writeFileSync(path.join(cwd, "root-new.txt"), "r\n");
+		fs.writeFileSync(path.join(cwd, "sub", "sub-new.txt"), "s\n");
+		const result = await readGitChanges(path.join(cwd, "sub"), "unstaged");
+		expect(result.files.map(f => f.path).sort()).toEqual(["root-new.txt", "sub/sub-new.txt"]);
+	});
+
+	test("the 200-file cap covers tracked and untracked files together", async () => {
+		const seed: Record<string, string> = {};
+		for (let i = 0; i < 150; i++) seed[`t${i}.txt`] = "a\n";
+		const cwd = committed(seed);
+		for (let i = 0; i < 150; i++) fs.writeFileSync(path.join(cwd, `t${i}.txt`), "b\n");
+		for (let i = 0; i < 150; i++) fs.writeFileSync(path.join(cwd, `u${i}.txt`), "u\n");
+		const result = await readGitChanges(cwd, "unstaged");
+		expect(result.files).toHaveLength(200);
+		expect(result.truncated).toBe(true);
+	});
+});
+
 describe("listGitBranches / switchGitBranch", () => {
 	function repoWithBranches(): string {
 		const cwd = initRepo();

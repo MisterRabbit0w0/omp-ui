@@ -431,6 +431,37 @@ describe("http api", () => {
 		expect((await api("/api/git/changes")).status).toBe(400);
 	});
 
+	test("git endpoints share one cwd validation and allow a repo with no sessions yet", async () => {
+		expect((await api(`/api/git/branches?cwd=${encodeURIComponent("relative/dir")}`)).status).toBe(400);
+		const missing = path.join(cwd, "does-not-exist");
+		expect((await api(`/api/git/changes?cwd=${encodeURIComponent(missing)}`)).status).toBe(404);
+		const gone = await api(`/api/git/branches?cwd=${encodeURIComponent(missing)}`);
+		expect(gone.status).toBe(200);
+		expect(await gone.json()).toEqual({ repo: false, current: null, branches: [] });
+
+		const repo = path.join(cwd, "fresh-project");
+		fs.mkdirSync(repo, { recursive: true });
+		const git = (...args: string[]) => {
+			const r = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "ignore", stderr: "ignore" });
+			if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+		};
+		git("init");
+		git("config", "user.email", "t@example.test");
+		git("config", "user.name", "t");
+		git("config", "commit.gpgsign", "false");
+		fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+		git("add", "a.txt");
+		git("commit", "-m", "init");
+		git("branch", "feature");
+		const res = await api("/api/git/switch", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ cwd: repo, branch: "feature" }),
+		});
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { current: string }).current).toBe("feature");
+	});
+
 	test("/api/file reads inside cwd and rejects .. traversal with 403", async () => {
 		fs.writeFileSync(path.join(cwd, "ok.txt"), "hello");
 		const ok = await api(`/api/file?cwd=${encodeURIComponent(cwd)}&path=ok.txt`);

@@ -1,9 +1,9 @@
 import type { Page } from "@playwright/test";
-import { approveBtn, approvalCard, expect, send, showAllSessions, sidebar, test, text } from "./fixtures";
+import { approveBtn, approvalCard, expect, launches, send, showAllSessions, sidebar, test, text } from "./fixtures";
 
 const popover = (page: Page) => page.getByRole("dialog").last();
 
-test("opening a fixture session warms the process; model switches before the first send", async ({ app }) => {
+test("opening a fixture session spawns nothing; opening the model menu starts it before the first send", async ({ app, bridge }) => {
 	await sidebar(app).getByText("Fixture rich session").click();
 	// read-only transcript: text, tool rows, code
 	await expect(text(app, "Reading then editing.")).toBeVisible();
@@ -11,9 +11,11 @@ test("opening a fixture session warms the process; model switches before the fir
 	await expect(app.locator("[data-tool-call-id]")).toHaveCount(2);
 	await expect(approvalCard(app)).toHaveCount(0);
 
-	// The background spawn/attach finished without sending: models and thinking are selectable.
-	await expect(app.getByRole("button", { name: /^模型：model，/ })).toBeVisible();
+	// Browsing the sidebar does not spawn (pool slots stay with live work)…
+	expect(launches(bridge)).toHaveLength(0);
+	// …opening the model menu does: once attached, models and thinking are selectable without sending.
 	await app.getByRole("button", { name: /^模型：/ }).click();
+	await expect.poll(() => launches(bridge).length).toBe(1);
 	await popover(app).getByRole("button", { name: /model-mini/ }).click();
 	await expect(app.getByRole("button", { name: /^模型：model-mini/ })).toBeVisible();
 	await app.keyboard.press("Escape");

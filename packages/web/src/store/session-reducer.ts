@@ -167,6 +167,14 @@ export function approvalReceiptKind(entry: AnsweredUi, result?: ToolResultMessag
 	return result?.isError ? "denied" : "approved";
 }
 
+/**
+ * Latest answered *approval* for a tool call. Ask answers share `toolCallId` with their tool but must
+ * render as an ask summary, never as an approval receipt.
+ */
+export function answeredApprovalFor(answered: ReadonlyArray<AnsweredUi> | undefined, toolCallId: string): AnsweredUi | undefined {
+	return answered?.findLast(a => a.toolCallId === toolCallId && isApprovalRequest(a.request));
+}
+
 /** One-line summaries `[question, answer]` for an answered ask. */
 export function askSummaryLines(entry: AnsweredUi): Array<[string, string]> {
 	const req = entry.request;

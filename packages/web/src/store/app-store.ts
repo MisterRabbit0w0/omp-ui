@@ -143,6 +143,34 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 	const restarting = new Set<string>();
 	/** In-flight lazy starts (background warm-up for previews, or send-time start) keyed by session id. */
 	const startingSessions = new Map<string, Promise<void>>();
+	/** Old id -> new id when a restart hands the conversation to a new process id. */
+	const renamedSessions = new Map<string, string>();
+	/** Follow-ups/interrupts held until the run ends so a deferred permission change applies first; chained per session. */
+	const heldSends = new Map<string, Promise<string>>();
+	const resolveSessionAlias = (id: string): string => {
+		let current = id;
+		for (let hops = 0; hops < 16 && renamedSessions.has(current); hops++) current = renamedSessions.get(current)!;
+		return current;
+	};
+
+	/** Resolves with the (possibly renamed) session id once its run has ended, or null if the view is gone. */
+	const waitForRunEnd = (id: string): Promise<string | null> =>
+		new Promise(resolve => {
+			let unsubscribe: (() => void) | null = null;
+			let done = false;
+			const check = (): void => {
+				if (done) return;
+				const current = resolveSessionAlias(id);
+				const view = store.getState().views[current];
+				const ended = !view || view.run.kind === "dead" || (view.run.kind === "idle" && view.proc !== "starting");
+				if (!ended) return;
+				done = true;
+				unsubscribe?.();
+				resolve(view ? current : null);
+			};
+			unsubscribe = store.subscribe(check);
+			check();
+		});
 
 	const store = create<AppState>()((set, get) => {
 		/**
@@ -453,13 +481,8 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 							[item.id]: { ...createSessionView(item.id, { readonly: true, title: item.title }), messages },
 						},
 					}));
-					// Spawn in the background right away so the model/thinking selectors work before
-					// the first prompt (they need a live omp process; send-time lazy start was too late).
-					void get()
-						.startSession(item.id)
-						.catch(err => {
-							get().pushToast("error", err instanceof Error ? err.message : "会话启动失败");
-						});
+					// No spawn here (§3.1): browsing the sidebar must not start (and pool-evict) processes. The
+					// composer starts it when the model/thinking menu opens; sending starts it otherwise.
 				} catch (err) {
 					get().pushToast("error", err instanceof Error ? err.message : "无法加载会话");
 				}
@@ -528,7 +551,9 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					client?.detach(sessionId);
 					set(s => {
 						const { [sessionId]: _removed, ...views } = s.views;
-						return { views, sessions: s.sessions.filter(it => it.id !== sessionId) };
+						const { [sessionId]: _attention, ...attention } = s.attention;
+						const { [sessionId]: _flash, ...todoFlash } = s.todoFlash;
+						return { views, attention, todoFlash, sessions: s.sessions.filter(it => it.id !== sessionId) };
 					});
 				}
 				if (wasCurrent) get().startWelcome(opts.cwd);
@@ -615,6 +640,7 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					const started = await c.start({ cwd, resume, model, thinking, approvalMode: mode });
 					currentId = started.sessionId;
 					if (currentId !== sessionId) {
+						renamedSessions.set(sessionId, currentId);
 						set(s => {
 							const { [sessionId]: previous, ...rest } = s.views;
 							return {
@@ -683,6 +709,36 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					sessionId = await get().restartWithApprovalMode(sessionId, afterStart.pendingApprovalMode);
 				} else if (afterStart?.pendingApprovalMode !== undefined && afterStart.pendingApprovalMode === afterStart.approvalMode) {
 					updateView(sessionId, v => ({ ...v, pendingApprovalMode: undefined }));
+				}
+				// Follow-up / interrupt during a run with a deferred permission change: both start a *new* request,
+				// which must run under the newly picked mode. `--approval-mode` is fixed per process, so hold the
+				// message, let the run end (interrupt aborts it), apply the mode (restart), then send it as a prompt.
+				const live = get().views[sessionId];
+				if (
+					live &&
+					(opts.mode === "followUp" || opts.mode === "interrupt") &&
+					live.proc === "ready" &&
+					live.run.kind !== "idle" &&
+					live.run.kind !== "dead" &&
+					live.pendingApprovalMode !== undefined &&
+					live.pendingApprovalMode !== live.approvalMode
+				) {
+					if (opts.mode === "interrupt") await get().abort(sessionId);
+					else get().pushToast("info", "权限切换将在当前请求结束后生效，这条消息会在切换后发送");
+					const previous = heldSends.get(sessionId) ?? Promise.resolve(sessionId);
+					const next = previous.then(async id => {
+						const idleId = await waitForRunEnd(id);
+						if (idleId === null) return id;
+						await get().sendPrompt(idleId, text, { images: opts.images });
+						return resolveSessionAlias(idleId);
+					});
+					heldSends.set(sessionId, next);
+					try {
+						await next;
+					} finally {
+						if (heldSends.get(sessionId) === next) heldSends.delete(sessionId);
+					}
+					return;
 				}
 				const c = requireClient();
 				const run = get().views[sessionId]?.run.kind ?? "idle";

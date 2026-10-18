@@ -10,6 +10,14 @@ import * as path from "node:path";
 import type { UiConfig } from "@omp-ui/protocol";
 
 const TRASH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** A lock older than this belongs to a crashed writer (a save takes milliseconds). */
+const LOCK_STALE_MS = 5_000;
+const LOCK_WAIT_MS = 2_000;
+const LOCK_RETRY_MS = 10;
+
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 export function defaultConfigDir(env: NodeJS.ProcessEnv = process.env): string {
 	return env.OMP_UI_HOME ?? path.join(os.homedir(), ".omp-ui");
@@ -35,21 +43,73 @@ export class ConfigStore {
 	}
 
 	update(patch: Partial<UiConfig>): UiConfig {
-		this.#config = { ...this.#fresh(), ...patch };
-		this.#save();
-		return this.#config;
+		return this.#mutate(current => ({ ...current, ...patch }));
 	}
 
 	archive(sessionId: string): void {
-		const archived = this.#fresh().archived;
-		if (archived.includes(sessionId)) return;
-		this.update({ archived: [...archived, sessionId] });
+		this.#mutate(current =>
+			current.archived.includes(sessionId) ? null : { ...current, archived: [...current.archived, sessionId] },
+		);
 	}
 
 	unarchive(sessionId: string): void {
-		const archived = this.#fresh().archived;
-		if (!archived.includes(sessionId)) return;
-		this.update({ archived: archived.filter(id => id !== sessionId) });
+		this.#mutate(current =>
+			current.archived.includes(sessionId)
+				? { ...current, archived: current.archived.filter(id => id !== sessionId) }
+				: null,
+		);
+	}
+
+	/**
+	 * Read-modify-write under a cross-process lock (`config.json.lock`, created with O_EXCL), so two bridges
+	 * changing different fields (e.g. archiving different sessions) never drop each other's update. The file
+	 * is re-read inside the lock; `fn` returning null means "no change".
+	 */
+	#mutate(fn: (current: UiConfig) => UiConfig | null): UiConfig {
+		fs.mkdirSync(this.dir, { recursive: true });
+		const release = this.#lock();
+		try {
+			this.#signature = "\0"; // force a re-read: another writer may have saved within our mtime resolution
+			const next = fn(this.#fresh());
+			if (next !== null) {
+				this.#config = next;
+				this.#save();
+			}
+			return this.#config;
+		} finally {
+			release();
+		}
+	}
+
+	#lock(): () => void {
+		const lockPath = `${this.configPath}.lock`;
+		const deadline = Date.now() + LOCK_WAIT_MS;
+		for (;;) {
+			try {
+				const fd = fs.openSync(lockPath, "wx");
+				fs.writeSync(fd, String(process.pid));
+				fs.closeSync(fd);
+				return () => {
+					try {
+						fs.rmSync(lockPath, { force: true });
+					} catch {
+						// already gone
+					}
+				};
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
+			try {
+				if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+					fs.rmSync(lockPath, { force: true });
+					continue;
+				}
+			} catch {
+				continue; // released between our open and stat
+			}
+			if (Date.now() > deadline) throw new Error(`config is locked by another omp-ui process: ${lockPath}`);
+			sleepSync(LOCK_RETRY_MS);
+		}
 	}
 
 	/** Move a session file into the trash. Throws when the source is missing. */

@@ -32,7 +32,9 @@ body {
 }
 
 /* Every UI text size is a Tailwind arbitrary px utility. Scaling them through the
-   variable keeps layout heights (rem/px) untouched while the setting visibly works. */
+   variable keeps layout heights (rem/px) untouched while the setting visibly works.
+   Keep these rules OUTSIDE any @layer (unlayered beats Tailwind's utilities layer).
+   src/styles/font-scale.test.ts fails when a new text-[Npx] size has no rule here. */
 [class~="text-[10.5px]"] { font-size: calc(10.5px * var(--app-font-scale, 1)); }
 [class~="text-[11px]"] { font-size: calc(11px * var(--app-font-scale, 1)); }
 [class~="text-[11.5px]"] { font-size: calc(11.5px * var(--app-font-scale, 1)); }

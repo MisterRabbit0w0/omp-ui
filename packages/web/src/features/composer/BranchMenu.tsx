@@ -1,6 +1,7 @@
 import type { GitBranchesResult } from "@omp-ui/protocol";
 import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { useEffect, useState } from "react";
+import { notifyGitChanged } from "@/lib/git-events";
 import { getBridge } from "@/store/bridge-access";
 import { Popover, PopoverContent, PopoverTrigger } from "@/ui/Popover";
 import { useSlidingHighlight } from "@/ui/sliding-highlight";
@@ -26,9 +27,14 @@ export function BranchMenuButton({ cwd, running = false, disabled = false }: Bra
 	const [switching, setSwitching] = useState<string | null>(null);
 	const hl = useSlidingHighlight<HTMLDivElement>({ variant: "menu" });
 
-	// Re-read when the workspace changes and whenever the menu opens (the terminal may have switched branches).
+	// A different workspace must never show the previous repo's branch, so drop the snapshot only on cwd change.
 	useEffect(() => {
 		setInfo(null);
+	}, [cwd]);
+
+	// Re-read when the workspace changes and whenever the menu opens (the terminal may have switched branches).
+	// The previous snapshot stays rendered meanwhile so the button doesn't flicker; a failed refresh keeps it too.
+	useEffect(() => {
 		if (!cwd) return;
 		let cancelled = false;
 		getBridge()
@@ -37,7 +43,7 @@ export function BranchMenuButton({ cwd, running = false, disabled = false }: Bra
 				if (!cancelled) setInfo(next);
 			})
 			.catch(() => {
-				if (!cancelled) setInfo(null);
+				// Keep the last good snapshot; the next open retries.
 			});
 		return () => {
 			cancelled = true;
@@ -61,6 +67,7 @@ export function BranchMenuButton({ cwd, running = false, disabled = false }: Bra
 		try {
 			setInfo(await getBridge().http.switchGitBranch(cwd, branch));
 			setOpen(false);
+			notifyGitChanged(cwd);
 			toast(`已切换到 ${branch}`, "info");
 		} catch (err) {
 			toast(err instanceof Error ? err.message : "切换分支失败", "error");

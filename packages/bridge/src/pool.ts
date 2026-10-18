@@ -45,6 +45,11 @@ export class ProcessPool<T extends PoolProcess> {
 		return entry?.proc;
 	}
 
+	/** Read without counting as a use (no LRU bump). */
+	peek(key: string): T | undefined {
+		return this.#entries.get(key)?.proc;
+	}
+
 	has(key: string): boolean {
 		return this.#entries.has(key);
 	}

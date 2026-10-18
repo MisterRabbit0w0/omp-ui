@@ -10,8 +10,12 @@ import type { CatalogModel } from "@omp-ui/protocol";
 /** Upper bound only: the real invalidation is the fingerprint of omp's own config/model files. */
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const TIMEOUT_MS = 60_000;
-/** Files omp (terminal or any other process) writes that change what `omp models` returns. */
-const WATCHED_FILES = ["config.yml", "models.yml", "models.db", "models.db-wal", "agent.db", "agent.db-wal"];
+/**
+ * Files omp (terminal or any other process) writes that change what `omp models` returns. `agent.db` is
+ * deliberately absent: omp writes it during ordinary session activity, which would invalidate the cache
+ * (and re-run the multi-second `omp models --json`) on nearly every request.
+ */
+const WATCHED_FILES = ["config.yml", "models.yml", "models.db", "models.db-wal"];
 
 /** mtime+size of every watched file; any change means another writer touched omp's model configuration. */
 export function modelConfigFingerprint(agentDir: string): string {

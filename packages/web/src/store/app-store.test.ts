@@ -287,6 +287,72 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().views.s8!.pendingApprovalMode).toBe("yolo");
 	});
 
+	test("a follow-up queued during the run waits, applies the deferred pick, then goes out as a prompt", async () => {
+		const { client, calls, starts } = recordingClient(["s9"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s9")],
+			currentSessionId: "s9",
+			views: { s9: readyView("s9", { run: { kind: "running" }, approvalMode: "yolo", pendingApprovalMode: "always-ask" }) },
+		});
+		const sending = store.getState().sendPrompt("s9", "after this run", { mode: "followUp" });
+		await Bun.sleep(0);
+		// never handed to the old (yolo) process
+		expect(calls.some(c => c === "rpc:follow_up")).toBe(false);
+		expect(starts).toEqual([]);
+		store.setState(s => ({ views: { ...s.views, s9: { ...s.views.s9!, run: { kind: "idle" } } } }));
+		await sending;
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "always-ask" })]);
+		expect(calls.indexOf("start:s9")).toBeLessThan(calls.indexOf("rpc:prompt"));
+		expect(calls).not.toContain("rpc:follow_up");
+		expect(store.getState().views.s9!.approvalMode).toBe("always-ask");
+	}, { timeout: 5_000 });
+
+	test("an interrupt with a deferred pick aborts, applies the new mode, then prompts", async () => {
+		const { client, calls, starts } = recordingClient(["s10"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s10")],
+			views: { s10: readyView("s10", { run: { kind: "running" }, approvalMode: "yolo", pendingApprovalMode: "write" }) },
+		});
+		const sending = store.getState().sendPrompt("s10", "stop and do this", { mode: "interrupt" });
+		await Bun.sleep(0);
+		expect(calls).toContain("rpc:abort");
+		expect(calls).not.toContain("rpc:abort_and_prompt");
+		store.setState(s => ({ views: { ...s.views, s10: { ...s.views.s10!, run: { kind: "idle" } } } }));
+		await sending;
+		expect(starts).toEqual([expect.objectContaining({ approvalMode: "write" })]);
+		expect(calls.indexOf("rpc:abort")).toBeLessThan(calls.indexOf("start:s10"));
+		expect(calls.indexOf("start:s10")).toBeLessThan(calls.indexOf("rpc:prompt"));
+	}, { timeout: 5_000 });
+
+	test("deleting a session also forgets its unread/attention state", () => {
+		const { client } = recordingClient([]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("gone"), sessionItem("kept")],
+			views: { gone: readyView("gone"), kept: readyView("kept") },
+			attention: { gone: 200, kept: 100 },
+			todoFlash: { gone: 1 },
+		});
+		store.getState().leaveSession("gone", { drop: true });
+		expect(store.getState().attention).toEqual({ kept: 100 });
+		expect(store.getState().todoFlash).toEqual({});
+		expect(store.getState().views.gone).toBeUndefined();
+	});
+
+	test("a follow-up without a deferred pick is still queued into the live run", async () => {
+		const { client, calls, starts } = recordingClient(["s11"]);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({
+			sessions: [sessionItem("s11")],
+			views: { s11: readyView("s11", { run: { kind: "running" }, approvalMode: "write" }) },
+		});
+		await store.getState().sendPrompt("s11", "later", { mode: "followUp" });
+		expect(calls).toContain("rpc:follow_up");
+		expect(starts).toEqual([]);
+	});
+
 	test("a failed start toasts and leaves the session exited instead of stuck on 'starting'", async () => {
 		const client = {
 			send: () => undefined,

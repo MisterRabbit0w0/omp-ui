@@ -155,6 +155,7 @@ export function Composer({
 	const pushToast = useAppStore(s => s.pushToast);
 	const welcomeRequest = useAppStore(s => s.welcomeRequest);
 	const restartWithApprovalMode = useAppStore(s => s.restartWithApprovalMode);
+	const startSession = useAppStore(s => s.startSession);
 
 	const [text, setText] = useState<string>(() =>
 		initialText !== undefined ? initialText : loadSessionDraft(sessionId),
@@ -285,6 +286,15 @@ export function Composer({
 	// Same order the menu renders (grouped by source): the highlight index, arrow keys and Enter/Tab must all agree.
 	const slashRows =
 		activeTrigger?.kind === "slash" ? orderSlashRows(filterSlashCommands(view?.commands ?? [], activeTrigger)) : [];
+
+	// The model/thinking selectors need a live omp process. A read-only preview starts one only when the user
+	// actually opens that menu (not on every sidebar click), sharing any in-flight start.
+	useEffect(() => {
+		if (!modelOpen || sessionId === null) return;
+		const v = useAppStore.getState().views[sessionId];
+		if (!v || !(v.readonly || v.proc === "none" || v.proc === "exited" || v.proc === "crashed")) return;
+		startSession(sessionId).catch(err => pushToast("error", err instanceof Error ? err.message : "会话启动失败"));
+	}, [modelOpen, sessionId, startSession, pushToast]);
 
 	// Reset menu highlight index when query changes
 	useEffect(() => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionUiRequest, ToolResultMessage } from "@omp-ui/protocol";
-import { approvalReceiptKind, askSummaryLines, createSessionView, reduce, resolveUi } from "./session-reducer";
+import { answeredApprovalFor, approvalReceiptKind, askSummaryLines, createSessionView, reduce, resolveUi } from "./session-reducer";
 
 const approval = (id: string): ExtensionUiRequest => ({
 	type: "extension_ui_request",
@@ -50,6 +50,19 @@ describe("answeredUi", () => {
 		expect(approvalReceiptKind(base, errResult)).toBe("denied");
 		expect(approvalReceiptKind(base, { ...errResult, isError: false })).toBe("approved");
 		expect(approvalReceiptKind(base)).toBe("approved");
+	});
+
+	test("an answered ask on a tool row is never picked up as that row's approval receipt", () => {
+		let v = createSessionView("s");
+		v = reduce(v, { type: "tool_execution_start", toolCallId: "k1", toolName: "ask", args: {} }, { live: true });
+		v = reduce(v, ask, { live: true });
+		v = resolveUi(v, "a1", { response: { type: "extension_ui_response", id: "a1", answers: [{ id: "q1", selectedOptions: ["Red"] }] } });
+		expect(v.answeredUi[0]!.toolCallId).toBe("k1");
+		expect(answeredApprovalFor(v.answeredUi, "k1")).toBeUndefined();
+		// The ask tool itself may also be gated by an approval; that one is the receipt.
+		v = reduce(v, { ...approval("u1"), title: "Allow tool: ask" } as ExtensionUiRequest, { live: true });
+		v = resolveUi(v, "u1");
+		expect(answeredApprovalFor(v.answeredUi, "k1")?.request.id).toBe("u1");
 	});
 
 	test("ask summary lines from answers, cancel and unknown", () => {

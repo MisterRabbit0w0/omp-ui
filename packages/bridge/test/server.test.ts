@@ -423,6 +423,14 @@ describe("http api", () => {
 		ws.close();
 	});
 
+	test("/api/git/changes reports a non-repo cwd without failing the request", async () => {
+		const res = await api(`/api/git/changes?cwd=${encodeURIComponent(cwd)}&scope=unstaged`);
+		expect(res.status).toBe(200);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ repo: false, scope: "unstaged", files: [] });
+		expect((await api("/api/git/changes")).status).toBe(400);
+	});
+
 	test("/api/file reads inside cwd and rejects .. traversal with 403", async () => {
 		fs.writeFileSync(path.join(cwd, "ok.txt"), "hello");
 		const ok = await api(`/api/file?cwd=${encodeURIComponent(cwd)}&path=ok.txt`);

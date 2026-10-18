@@ -3,7 +3,7 @@
  * `Authorization: Bearer <token>`; errors throw HttpError with the bridge's
  * `{error}` message.
  */
-import type { AgentMessage, CatalogModel, Diagnostics, FileHit, ProjectItem, SessionListItem, UiConfig } from "@omp-ui/protocol";
+import type { AgentMessage, CatalogModel, Diagnostics, FileHit, GitChangeScope, GitChangesResult, ProjectItem, SessionListItem, UiConfig } from "@omp-ui/protocol";
 
 export class HttpError extends Error {
 	readonly status: number;
@@ -116,6 +116,11 @@ export class BridgeHttp {
 	/** Chat-model catalog (omp models --json); slow on first call, cached by the bridge. */
 	listModels(): Promise<CatalogModel[]> {
 		return this.request("GET", "/api/models");
+	}
+
+	/** Read-only git working-tree changes for the 变更 panel. */
+	getGitChanges(cwd: string, scope: GitChangeScope): Promise<GitChangesResult> {
+		return this.request("GET", `/api/git/changes${queryString({ cwd, scope })}`);
 	}
 
 	listProjects(): Promise<ProjectItem[]> {

@@ -17,6 +17,7 @@ import {
 	normalizePanelTabId,
 	parseUnifiedDiffLines,
 	removeTodoTask,
+	selectLatestTurnChangedFiles,
 	SidePanel,
 	splitFilePath,
 	toggleTodoTask,
@@ -402,6 +403,37 @@ describe("Changed files grouping & Btw turns", () => {
 		expect(groups[1]!.deletions).toBe(12);
 		expect(parseUnifiedDiffLines(groups[1]!.mergedDiff).some(l => l.kind === "add")).toBe(true);
 		expect(splitFilePath("README.md")).toEqual({ dir: "", base: "README.md" });
+	});
+
+	test("selectLatestTurnChangedFiles keeps only the most recent editing turn", () => {
+		const assistant = (id: string, timestamp: number) => ({
+			role: "assistant" as const,
+			content: [{ type: "toolCall" as const, id, name: "edit", arguments: { path: `${id}.ts` } }],
+			api: "fake",
+			provider: "fake",
+			model: "fake/model",
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "toolUse" as const,
+			timestamp,
+		});
+		const toolResult = (toolCallId: string, timestamp: number) => ({
+			role: "toolResult" as const,
+			toolCallId,
+			toolName: "edit",
+			content: [{ type: "text" as const, text: "ok" }],
+			isError: false,
+			timestamp,
+		});
+		let view = createSessionView("latest-turn");
+		view = reduce(view, { type: "message_end", messageId: "u1", message: { role: "user", content: "first", timestamp: 1 } }, { live: false });
+		view = reduce(view, { type: "message_end", messageId: "m1", message: assistant("e1", 2) }, { live: false });
+		view = reduce(view, { type: "message_end", messageId: "r1", message: toolResult("e1", 3) }, { live: false });
+		view = reduce(view, { type: "message_end", messageId: "u2", message: { role: "user", content: "second", timestamp: 4 } }, { live: false });
+		view = reduce(view, { type: "message_end", messageId: "m2", message: assistant("e2", 5) }, { live: false });
+		view = reduce(view, { type: "message_end", messageId: "r2", message: toolResult("e2", 6) }, { live: false });
+
+		expect(selectLatestTurnChangedFiles(view).map(entry => entry.path)).toEqual(["e2.ts"]);
+		expect(groupChangedFiles(view, selectLatestTurnChangedFiles(view)).map(group => group.path)).toEqual(["e2.ts"]);
 	});
 
 	test("parseUnifiedDiffLines parses omp +123|content / -123|content / ' 123|content' lines", () => {

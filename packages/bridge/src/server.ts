@@ -19,6 +19,7 @@ import type {
 import { DEFAULT_PORT, WS_PATH } from "@omp-ui/protocol";
 import { ConfigStore } from "./config";
 import { FileAccessError, readSessionFile, searchFiles } from "./files";
+import { readGitChanges } from "./git";
 import { ModelCatalog } from "./models";
 import { ProcessPool } from "./pool";
 import { OmpProcess, resolveOmpCommand } from "./process";
@@ -390,6 +391,16 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			const cwd = url.searchParams.get("cwd") ?? "";
 			if (cwd.length === 0) return errorJson(400, "cwd is required");
 			return json(await searchFiles(cwd, url.searchParams.get("q") ?? ""));
+		}
+		if (req.method === "GET" && url.pathname === "/api/git/changes") {
+			const cwd = url.searchParams.get("cwd") ?? "";
+			if (cwd.length === 0) return errorJson(400, "cwd is required");
+			const scope = url.searchParams.get("scope") === "staged" ? "staged" : "unstaged";
+			try {
+				return json(await readGitChanges(cwd, scope));
+			} catch (error) {
+				return errorJson(502, (error as Error).message);
+			}
 		}
 		if (req.method === "GET" && url.pathname === "/api/file") {
 			const cwd = url.searchParams.get("cwd") ?? "";

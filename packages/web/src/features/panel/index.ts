@@ -23,6 +23,7 @@ export {
 	removeTodoTask,
 	SCROLL_TO_TOOL_EVENT,
 	scrollToToolCall,
+	selectLatestTurnChangedFiles,
 	splitFilePath,
 	toggleTodoTask,
 	type DiffLineItem,

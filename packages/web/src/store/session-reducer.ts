@@ -330,6 +330,20 @@ export function reduceProc(view: SessionView, proc: ProcState, info?: { code?: n
 	return { ...view, proc, run, banners: view.banners.filter(b => b.kind !== "proc-exit") };
 }
 
+/**
+ * The bridge released an idle process to free resources (§3.1): not an error. The transcript stays, no exit
+ * banner; the next interaction (opening it, sending, picking a model) starts a fresh process.
+ */
+export function releaseProc(view: SessionView): SessionView {
+	return {
+		...view,
+		proc: "none",
+		run: view.run.kind === "dead" ? view.run : { kind: "idle" },
+		pendingUi: [],
+		banners: view.banners.filter(b => b.kind !== "proc-exit"),
+	};
+}
+
 /** Discard everything server-owned; the store follows with a cold start (§3.4 resync). */
 export function resetForResync(view: SessionView): SessionView {
 	return createSessionView(view.sessionId, { proc: view.proc === "none" ? "none" : view.proc, title: view.title, approvalMode: view.approvalMode, pendingApprovalMode: view.pendingApprovalMode });

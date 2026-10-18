@@ -371,3 +371,95 @@ describe("restartWithApprovalMode", () => {
 		expect(store.getState().views.s6!.proc).toBe("exited");
 	});
 });
+
+describe("process warm-up and release (§3.1)", () => {
+	const previewItem = (id: string) => ({ ...sessionItem(id), live: false });
+	const transcriptHttp = { getTranscript: async () => [{ role: "user", content: "old", timestamp: 1 }] } as unknown as BridgeHttp;
+
+	test("selecting a session shows the preview and warms its process right away", async () => {
+		const { client, calls, starts } = recordingClient(["p1"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		store.setState({ sessions: [previewItem("p1")], config: { archived: [], recentProjects: [], defaultApprovalMode: "always-ask" } });
+		await store.getState().openSession(previewItem("p1"));
+		await waitUntil(() => store.getState().views.p1?.readonly === false);
+		expect(starts).toEqual([expect.objectContaining({ cwd: "/work", resume: "/tmp/p1.jsonl", approvalMode: "always-ask" })]);
+		expect(calls).toContain("attach:p1");
+	});
+
+	test("skimming the sidebar only warms the session the user stays on", async () => {
+		const { client, starts } = recordingClient(["b"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 20 });
+		store.setState({ sessions: [previewItem("a"), previewItem("b")] });
+		await store.getState().openSession(previewItem("a"));
+		await store.getState().openSession(previewItem("b"));
+		await waitUntil(() => starts.length > 0);
+		await Bun.sleep(40);
+		expect(starts.map(s => s.resume)).toEqual(["/tmp/b.jsonl"]);
+	});
+
+	test("a permission picked while the warm-up is in flight is applied once it lands", async () => {
+		const { client, starts } = recordingClient(["p2"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		const original = client.start.bind(client);
+		let landed!: () => void;
+		const gate = new Promise<void>(resolve => (landed = resolve));
+		(client as { start: typeof client.start }).start = async opts => {
+			const result = await original(opts);
+			if (starts.length === 1) await gate;
+			return result;
+		};
+		// Like the bridge: attaching replies with the process state.
+		const attach = client.attach.bind(client);
+		(client as { attach: typeof client.attach }).attach = id => {
+			attach(id);
+			store.getState().dispatch({ t: "proc", sessionId: id, state: "ready" });
+		};
+		store.setState({ sessions: [previewItem("p2")] });
+		await store.getState().openSession(previewItem("p2"));
+		expect(store.getState().views.p2!.proc).toBe("starting");
+		const switched = store.getState().restartWithApprovalMode("p2", "yolo");
+		landed();
+		await switched;
+		expect(starts).toHaveLength(2);
+		expect(starts.at(-1)?.approvalMode).toBe("yolo");
+		expect(store.getState().views.p2!.approvalMode).toBe("yolo");
+	});
+
+	test("a released process keeps the transcript without an exit banner and warms again on return", async () => {
+		const { client, starts } = recordingClient(["r1"]);
+		const store = createAppStore({ client, http: transcriptHttp, warmStartDelayMs: 0 });
+		const item = sessionItem("r1");
+		store.setState({
+			sessions: [{ ...item, live: false }],
+			currentSessionId: null,
+			views: { r1: readyView("r1", { messages: [{ role: "user", content: "hi", timestamp: 1 }] }) },
+		});
+		store.getState().dispatch({ t: "proc", sessionId: "r1", state: "exited", reason: "released" });
+		const view = store.getState().views.r1!;
+		expect(view.proc).toBe("none");
+		expect(view.run.kind).toBe("idle");
+		expect(view.banners.some(b => b.kind === "proc-exit")).toBe(false);
+		expect(view.messages).toHaveLength(1);
+		await store.getState().openSession({ ...item, live: false });
+		await waitUntil(() => starts.length === 1);
+		expect(starts[0]).toMatchObject({ resume: "/tmp/r1.jsonl" });
+	});
+
+	test("the bridge is told which session this tab shows", () => {
+		const focused: (string | null)[] = [];
+		const { client } = recordingClient(["f"]);
+		(client as unknown as { focus: (id: string | null) => void }).focus = id => void focused.push(id);
+		const store = createAppStore({ client, http: {} as BridgeHttp });
+		store.setState({ currentSessionId: "f" });
+		store.getState().startWelcome();
+		expect(focused).toEqual(["f", null]);
+	});
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) throw new Error("waitUntil timed out");
+		await Bun.sleep(2);
+	}
+}

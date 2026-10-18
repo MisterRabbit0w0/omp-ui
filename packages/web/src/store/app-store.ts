@@ -34,6 +34,7 @@ import {
 	reduce,
 	reduceProc,
 	reducePromptAck,
+	releaseProc,
 	resolveUi,
 	resetForResync,
 	subagentsFromSnapshots,
@@ -122,7 +123,14 @@ let toastCounter = 0;
 export interface AppDeps {
 	client: BridgeClient;
 	http: BridgeHttp;
+	/**
+	 * Delay before a selected session's process is warmed up (§3.1). Skimming the sidebar quickly only starts the
+	 * one the user stays on; `0` starts synchronously (tests).
+	 */
+	warmStartDelayMs: number;
 }
+
+const WARM_START_DELAY_MS = 150;
 
 const MESSAGE_PAGE_LIMIT = 200;
 const COLD_START_RETRIES = 3;
@@ -334,9 +342,28 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 			}
 		};
 
+		/**
+		 * Warm the selected session's process (§3.1) unless the user has already moved on. Spawn errors surface as a
+		 * toast; the view stays a usable preview and the next send retries.
+		 */
+		const scheduleWarmStart = (sessionId: string): void => {
+			const run = (): void => {
+				if (store.getState().currentSessionId !== sessionId) return;
+				store
+					.getState()
+					.startSession(sessionId)
+					.catch(err => store.getState().pushToast("error", err instanceof Error ? err.message : "启动会话进程失败"));
+			};
+			const delay = deps?.warmStartDelayMs ?? WARM_START_DELAY_MS;
+			if (delay <= 0) run();
+			else setTimeout(run, delay);
+		};
+
 		const attachAndStart = async (sessionId: string, opts: StartOptions): Promise<void> => {
 			const c = requireClient();
 			updateView(sessionId, v => ({ ...v, proc: "starting" }));
+			// A previous (exited / released) process's last seq would make the new ring's replay start mid-way.
+			c.detach?.(sessionId);
 			// The bridge only accepts `attach` for a live process, so start first; attach replays the ring from seq 0.
 			await c.start(opts);
 			c.attach(sessionId);
@@ -402,6 +429,11 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 						break;
 					case "proc":
 						if (restarting.has(msg.sessionId) && (msg.state === "exited" || msg.state === "crashed")) break;
+						if (msg.reason === "released") {
+							// Idle process handed back to the pool: keep the transcript, restart on demand.
+							updateView(msg.sessionId, releaseProc);
+							break;
+						}
 						updateView(msg.sessionId, v => reduceProc(v, msg.state, { code: msg.code, stderrTail: msg.stderrTail }));
 						break;
 					case "sessions_changed":
@@ -460,17 +492,33 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 
 			async openSession(item: SessionListItem): Promise<void> {
 				set({ currentSessionId: item.id });
+				// Its warm-up is already in flight (quick back-and-forth): replacing the view now would race it.
+				if (startingSessions.has(item.id)) return;
 				const existing = get().views[item.id];
-				if (existing && !existing.readonly) return;
+				const released = existing !== undefined && !existing.readonly && existing.proc === "none";
+				if (existing && !existing.readonly && !released) return;
 				if (item.live) {
-					if (!existing) {
-						set(s => ({ views: { ...s.views, [item.id]: createSessionView(item.id, { proc: "starting", title: item.title }) } }));
-					}
+					// Live in the bridge (another tab, or a list newer than our release notice): attach, never respawn
+					// a second process over it.
+					set(s => ({
+						views: {
+							...s.views,
+							[item.id]: existing
+								? { ...existing, readonly: false, proc: "starting" }
+								: createSessionView(item.id, { proc: "starting", title: item.title }),
+						},
+					}));
 					requireClient().attach(item.id);
 					await get().coldStart(item.id);
 					return;
 				}
-				// Read-only preview: parse the transcript without spawning (§3.1).
+				if (released) {
+					// Its process was released while the user looked elsewhere: the transcript is still here.
+					scheduleWarmStart(item.id);
+					return;
+				}
+				// Read-only preview first (the transcript renders without waiting on a process), then warm up the
+				// process in the background (§3.1) so permission switches, model picks and sends act on a live session.
 				if (!http) return;
 				try {
 					const transcript = await http.getTranscript(item.id);
@@ -478,14 +526,22 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 					set(s => ({
 						views: {
 							...s.views,
-							[item.id]: { ...createSessionView(item.id, { readonly: true, title: item.title }), messages },
+							[item.id]: {
+								...createSessionView(item.id, {
+									readonly: true,
+									title: item.title,
+									// A permission picked on an earlier preview of this session survives the refresh.
+									...(existing?.approvalMode !== undefined ? { approvalMode: existing.approvalMode } : {}),
+								}),
+								messages,
+							},
 						},
 					}));
-					// No spawn here (§3.1): browsing the sidebar must not start (and pool-evict) processes. The
-					// composer starts it when the model/thinking menu opens; sending starts it otherwise.
 				} catch (err) {
 					get().pushToast("error", err instanceof Error ? err.message : "无法加载会话");
+					return;
 				}
+				scheduleWarmStart(item.id);
 			},
 
 			async newSession(cwd: string, opts: NewSessionOptions = {}): Promise<string> {
@@ -597,9 +653,22 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 			},
 
 			async restartWithApprovalMode(sessionId: string, mode: ApprovalMode): Promise<string> {
-				const view = get().views[sessionId];
+				let view = get().views[sessionId];
 				if (!view || restarting.has(sessionId)) return sessionId;
-				// No live process (preview / exited): remember the mode, the lazy start applies it.
+				// A (warm-up) start is in flight with the old mode already sent: let it land, then switch for real.
+				const inflight = startingSessions.get(sessionId);
+				if (inflight) {
+					await inflight.catch(() => undefined);
+					view = get().views[sessionId];
+					if (!view) return sessionId;
+				}
+				// Attaching to a process that is still coming up (no start of ours to wait for): defer like a busy run.
+				if (view.proc === "starting") {
+					const effective = view.approvalMode ?? get().config?.defaultApprovalMode ?? "write";
+					updateView(sessionId, v => ({ ...v, pendingApprovalMode: mode === effective ? undefined : mode }));
+					return sessionId;
+				}
+				// No live process (preview / exited / released): remember the mode, the lazy start applies it.
 				if (view.readonly || view.proc === "none" || view.proc === "exited" || view.proc === "crashed") {
 					updateView(sessionId, v => ({ ...v, approvalMode: mode, pendingApprovalMode: undefined }));
 					return sessionId;
@@ -829,6 +898,11 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				set(s => ({ toasts: s.toasts.filter(t => t.id !== id) }));
 			},
 		};
+	});
+
+	// Tell the bridge which session this tab shows: that process stays pinned, the others may be released (§3.1).
+	store.subscribe((state, prev) => {
+		if (state.currentSessionId !== prev.currentSessionId) client?.focus?.(state.currentSessionId);
 	});
 
 	return store;

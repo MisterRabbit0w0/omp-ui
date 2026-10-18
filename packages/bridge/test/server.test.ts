@@ -630,3 +630,54 @@ describe("GET /api/models", () => {
 		}
 	});
 });
+
+describe("elastic pool release", () => {
+	test("idle unviewed processes are released as `released` (no exit code); the viewed one stays pinned", async () => {
+		const previousRich = process.env.FAKE_OMP_RICH;
+		process.env.FAKE_OMP_RICH = "1"; // distinct session ids per start
+		const own = await createBridge({
+			port: 0,
+			token: TOKEN,
+			ompCommand: FAKE_OMP_COMMAND,
+			ompVersion: "18.11.1",
+			agentDir: tempDir("pool-agent"),
+			configDir: tempDir("pool-config"),
+			poolMax: 1,
+			poolHardMax: 4,
+		});
+		try {
+			const ws = TestWs.connect(`ws://127.0.0.1:${own.port}/ws`);
+			await ws.ready();
+			ws.hello(TOKEN);
+			await ws.waitMessage(msg => msg.t === "welcome");
+			const start = async (reqId: string): Promise<string> => {
+				ws.send({ t: "start", reqId, cwd });
+				const started = await ws.waitMessage(msg => msg.t === "started" && msg.reqId === reqId);
+				if (started.t !== "started") throw new Error("unexpected");
+				return started.sessionId;
+			};
+			const released = (id: string) => (msg: B2C) => msg.t === "proc" && msg.sessionId === id && msg.reason === "released";
+
+			const a = await start("p1");
+			const b = await start("p2"); // over the soft cap: a is idle and unviewed
+			const notice = await ws.waitMessage(released(a));
+			expect(notice.t === "proc" && notice.code).toBeFalsy();
+			expect(own.pool.keys()).toEqual([b]);
+
+			ws.send({ t: "focus", sessionId: b });
+			const c = await start("p3"); // b is pinned: the pool grows instead of releasing it
+			await Bun.sleep(50);
+			expect(own.pool.keys().sort()).toEqual([b, c].sort());
+			expect(ws.messages.some(released(b))).toBe(false);
+
+			ws.send({ t: "focus", sessionId: c }); // b lost its pin: back down to the soft cap
+			await ws.waitMessage(released(b));
+			expect(own.pool.keys()).toEqual([c]);
+			ws.close();
+		} finally {
+			if (previousRich === undefined) delete process.env.FAKE_OMP_RICH;
+			else process.env.FAKE_OMP_RICH = previousRich;
+			await own.close();
+		}
+	});
+});

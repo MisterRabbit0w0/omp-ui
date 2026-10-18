@@ -71,7 +71,7 @@ omp-ui/
     bridge/
       src/server.ts         # HTTP + WS，鉴权
       src/process.ts        # OmpProcess：spawn、帧解析、v2 分片重组、请求关联
-      src/pool.ts           # 进程池、LRU 回收
+      src/pool.ts           # 弹性进程池：软/硬上限、LRU 与空闲回收
       src/sessions.ts       # 扫描/监听 sessions 目录
       src/files.ts          # @ 提及文件搜索、受限文件读取
       src/config.ts         # ~/.omp-ui/config.json
@@ -94,8 +94,14 @@ omp-ui/
 - 一个打开的会话对应一个 `omp --mode rpc-ui` 子进程，以 `sessionId` 为键。
 - 新会话：`omp --mode rpc-ui --cwd <dir> [--model p/id] [--thinking L] [--approval-mode M]`。
 - 恢复会话：追加 `--resume <sessionFile>`。崩溃恢复用 `--restore <sessionFile>`。
-- 只读预览先展示、按需启动：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史，此时不 spawn（浏览侧边栏不占进程池、不触发 LRU 回收）。打开模型/思考级别菜单时前端在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"），因此发送前即可切换模型；首次发送复用同一个进程，未打开菜单则在发送时启动。
-- 进程池上限默认 6。超限时回收最久未用、`isSettled=true` 且无待答 UI 请求的进程（`SIGTERM`，5 秒后 `SIGKILL`）。正在流式输出或有待答请求的进程永不回收。
+- 只读预览先展示、选中即预热：侧边栏点开一个未激活的会话时，Bridge 先解析 jsonl 立即渲染历史；用户停留约 150 ms 后前端在后台 spawn + attach（启动约 2–6 秒，期间显示 "启动中"），快速扫过侧边栏只会启动最终停留的那一个。权限切换、模型/思考级别、发送都作用在这个进程上：启动进行中时它们等待同一个启动（权限切换在启动完成后再按新模式重启），不会重复 spawn 或丢失选择。
+- 弹性进程池（`pool.ts`）：
+  - 软上限默认 6（`poolMax`）。超过软上限时立即回收最久未用的空闲进程（`isSettled=true`、未在流式输出、无待答 UI 请求）。
+  - 前端通过 `focus` 告知当前查看的会话；被任一标签页查看的进程被"钉住"，不参与软上限回收，回收顺序为未查看的在前。
+  - 当所有进程都在工作或被查看时池子可以越过软上限扩容，直到硬上限：默认按空闲内存（每进程预算约 300 MB，保留 1 GB）与 CPU 数（×4，最多 32）动态计算，且不低于软上限（`poolHardMax` 可固定）。达到硬上限时先回收空闲进程（含被查看的），仍无可回收时拒绝启动并提示"进程池已满"，绝不杀正在工作的进程。
+  - 运行结束（`session_settled`）、切换查看、标签页断开时重新平衡，扩容出来的进程回落到软上限以内。
+  - 空闲回收：未被查看且空闲超过 10 分钟（`poolIdleTtlMs`）的进程即使在软上限内也会被释放。
+  - 回收即 `SIGTERM`，5 秒后 `SIGKILL`；广播 `{t:"proc", state:"exited", reason:"released"}`。前端把视图置为"未启动"（保留历史、不显示退出横幅），下次查看/发送/打开模型菜单时按需重新启动。
 - `omp` 可执行路径：`OMP_UI_OMP_BIN` > `Bun.which("omp")`。启动时运行 `omp --version`，低于 18.11.0 拒绝并提示。
 - stderr 收集到每进程 200KB 环形缓冲，在「诊断」面板可看。
 
@@ -239,6 +245,7 @@ type C2B =
   | { t: "hello"; token: string }
   | { t: "attach"; sessionId: string; sinceSeq?: number }
   | { t: "detach"; sessionId: string }
+  | { t: "focus"; sessionId: string | null }                 // 本标签页正在查看的会话（进程池钉住，§3.1）
   | { t: "start"; reqId: string; cwd: string; resume?: string; restore?: boolean;
       model?: string; thinking?: string; approvalMode?: "always-ask" | "write" | "yolo" }
   | { t: "stop"; sessionId: string }                         // 结束进程
@@ -257,7 +264,7 @@ type B2C =
   | { t: "resync"; sessionId: string }
   | { t: "ui_resolved"; sessionId: string; id: string }
   | { t: "proc"; sessionId: string; state: "starting" | "ready" | "exited" | "crashed";
-      code?: number; stderrTail?: string }
+      reason?: "released"; code?: number; stderrTail?: string }   // released = 进程池回收空闲进程，非错误
   | { t: "sessions_changed" }
   | { t: "error"; reqId?: string; message: string };
 ```

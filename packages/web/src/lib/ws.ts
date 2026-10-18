@@ -106,6 +106,8 @@ export class BridgeClient {
 	private readonly startPending = new Map<string, { resolve: (r: StartResult) => void; reject: (err: unknown) => void }>();
 	/** Attached sessions and the last frame seq seen for each. */
 	private readonly attached = new Map<string, number>();
+	/** Session this tab shows; re-sent after every reconnect so the bridge keeps its process pinned. */
+	private focused: string | null = null;
 	/** bridge-internal command id (`b-<seq>`) -> our reqId, for prompt_result correlation. */
 	private readonly serverCommandIds = new Map<string, string>();
 	private readonly outbox: C2B[] = [];
@@ -157,6 +159,13 @@ export class BridgeClient {
 	attach(sessionId: string): void {
 		if (!this.attached.has(sessionId)) this.attached.set(sessionId, 0);
 		this.sendAttach(sessionId);
+	}
+
+	/** Tell the bridge which session this tab shows (pins it in the process pool; §3.1). */
+	focus(sessionId: string | null): void {
+		if (this.focused === sessionId) return;
+		this.focused = sessionId;
+		if (this.state === "connected") this.send({ t: "focus", sessionId });
 	}
 
 	detach(sessionId: string): void {
@@ -225,6 +234,7 @@ export class BridgeClient {
 				this.setState("connected");
 				// Re-attach every session, replaying from the last seen seq (§11).
 				for (const [sessionId] of this.attached) this.sendAttach(sessionId);
+				if (this.focused !== null) this.send({ t: "focus", sessionId: this.focused });
 				const queued = this.outbox.splice(0);
 				for (const m of queued) this.send(m);
 				this.opts.onMessage?.(msg);

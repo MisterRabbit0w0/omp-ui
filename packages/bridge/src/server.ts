@@ -60,7 +60,14 @@ export interface BridgeOptions {
 	webDist?: string;
 	agentDir?: string;
 	configDir?: string;
+	/** Soft cap of the process pool (idle processes beyond it are released). */
 	poolMax?: number;
+	/** Hard cap of the process pool; default sized from free memory / CPUs (§3.1). */
+	poolHardMax?: number;
+	/** Release unviewed idle processes after this long; `0` disables. */
+	poolIdleTtlMs?: number;
+	/** How often the idle reaper runs. */
+	poolReapIntervalMs?: number;
 	/** Test seam: per-process frame ring cap. */
 	ringMaxFrames?: number;
 }
@@ -81,6 +88,8 @@ export interface BridgeHandle {
 interface WsData {
 	authed: boolean;
 	attached: Set<string>;
+	/** Session this tab currently shows (`focus`); pins its process in the pool. */
+	focused?: string | null;
 	helloTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -108,7 +117,20 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 	const config = new ConfigStore(options.configDir);
 	await config.purgeTrash();
 	const modelCatalog = new ModelCatalog(ompCommand, options.agentDir ?? defaultAgentDir());
-	const pool = new ProcessPool<OmpProcess>(options.poolMax);
+	/** Processes the pool released for being idle; their exit is announced as `released`, not as a crash/exit. */
+	const releasedProcs = new WeakSet<OmpProcess>();
+	const pool: ProcessPool<OmpProcess> = new ProcessPool<OmpProcess>({
+		...(options.poolMax !== undefined ? { softMax: options.poolMax } : {}),
+		...(options.poolHardMax !== undefined ? { hardMax: options.poolHardMax } : {}),
+		...(options.poolIdleTtlMs !== undefined ? { idleTtlMs: options.poolIdleTtlMs } : {}),
+		isPinned: key => {
+			for (const ws of clients) if (ws.data.focused === key) return true;
+			return false;
+		},
+		onEvict: (_key, proc) => releasedProcs.add(proc),
+	});
+	const reapTimer = setInterval(() => void pool.reapIdle(), options.poolReapIntervalMs ?? 30_000);
+	reapTimer.unref?.();
 
 	/**
 	 * True when a live process mid-run works inside the git work tree containing `dir` (any subdirectory of it,
@@ -177,6 +199,18 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 		if (msg.resume !== undefined && deletingFiles.has(path.resolve(msg.cwd, msg.resume))) {
 			throw new Error("session is being deleted");
 		}
+		// Admission against the hard cap (may release idle processes); throws when every slot is busy.
+		const releaseSlot = await pool.reserve();
+		try {
+			return await spawnReserved(msg);
+		} finally {
+			releaseSlot();
+		}
+	};
+
+	const spawnReserved = async (
+		msg: Extract<C2B, { t: "start" }>,
+	): Promise<{ key: string; proc: OmpProcess }> => {
 		let key: string | null = null;
 		const proc = new OmpProcess(
 			{
@@ -196,6 +230,8 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					broadcastToSession(key, { t: "frame", sessionId: key, seq, frame });
 					// Run start/end flips `running` in the session list; tabs not attached to this session need it.
 					if (frame.type === "agent_start" || frame.type === "session_settled") broadcast({ t: "sessions_changed" });
+					// A run that ended may leave the pool over its soft cap (it grew while everything was busy).
+					if (frame.type === "session_settled") queueMicrotask(() => void pool.rebalance());
 				},
 				onUiResolved: (id, auto) => {
 					if (key === null) return;
@@ -214,16 +250,20 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 					// `stop` and superseded since (pool entry now belongs to another process). Never announce its exit.
 					if (terminal && (replacedProcs.has(proc) || (current !== undefined && current !== proc))) return;
 					protocolVersion = proc.protocolVersion;
+					const released = terminal && releasedProcs.has(proc);
 					broadcast({
 						t: "proc",
 						sessionId: key,
 						state,
-						...(code !== undefined ? { code } : {}),
-						...(stderrTail !== undefined ? { stderrTail } : {}),
+						...(released ? { reason: "released" as const } : {}),
+						...(code !== undefined && !released ? { code } : {}),
+						...(stderrTail !== undefined && !released ? { stderrTail } : {}),
 					});
 					if (terminal && current === proc) {
 						void pool.remove(key);
 					}
+					// The sidebar's live dot goes away with it.
+					if (released) broadcast({ t: "sessions_changed" });
 				},
 			},
 		);
@@ -284,6 +324,14 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 			case "detach":
 				ws.data.attached.delete(msg.sessionId);
 				return;
+			case "focus": {
+				const previous = ws.data.focused ?? null;
+				ws.data.focused = msg.sessionId;
+				if (msg.sessionId !== null) pool.touch(msg.sessionId);
+				// The previously viewed process lost its pin: release it if the pool is over its soft cap.
+				if (previous !== null && previous !== msg.sessionId) void pool.rebalance(msg.sessionId ?? undefined);
+				return;
+			}
 			case "start": {
 				try {
 					const { key } = await spawnSession(msg);
@@ -650,6 +698,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 				close(ws) {
 					clearTimeout(ws.data.helloTimer);
 					clients.delete(ws);
+					if (ws.data.focused) void pool.rebalance();
 				},
 			},
 		});
@@ -690,6 +739,7 @@ export async function createBridge(options: BridgeOptions = {}): Promise<BridgeH
 		config,
 		async close() {
 			unwatch();
+			clearInterval(reapTimer);
 			scanner.close();
 			for (const ws of [...clients]) {
 				try {

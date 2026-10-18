@@ -114,6 +114,45 @@ export function groupSessionsByCwd(sessions: readonly SessionListItem[]): Sessio
 }
 
 /**
+ * Default number of sessions shown per workspace group before the explicit
+ * "显示更多" expansion (the sidebar stays scannable with many sessions).
+ */
+export const SESSION_GROUP_PREVIEW_LIMIT = 5;
+
+export interface GroupSessionsPreview {
+	sessions: SessionListItem[];
+	hiddenCount: number;
+	/** True when the group has more sessions than the preview limit (or holds an older current session). */
+	hasMore: boolean;
+}
+
+/**
+ * Short-list a workspace group. Collapsed groups show the latest few sessions, always
+ * keeping the current session visible when it lives in this group. Search bypasses the
+ * limit; groups that were collapsed and reopened start from the short list again.
+ */
+export function previewGroupSessions(
+	sessions: readonly SessionListItem[],
+	opts: { expanded?: boolean; currentSessionId?: string | null; limit?: number } = {},
+): GroupSessionsPreview {
+	const limit = Math.max(1, opts.limit ?? SESSION_GROUP_PREVIEW_LIMIT);
+	if (opts.expanded || sessions.length <= limit) {
+		return { sessions: [...sessions], hiddenCount: 0, hasMore: false };
+	}
+	const visible = sessions.slice(0, limit);
+	const currentId = opts.currentSessionId;
+	if (currentId && !visible.some(item => item.id === currentId)) {
+		const current = sessions.find(item => item.id === currentId);
+		if (current) visible.push(current);
+	}
+	return {
+		sessions: visible,
+		hiddenCount: sessions.length - visible.length,
+		hasMore: true,
+	};
+}
+
+/**
  * Derive sidebar row status indicator (FRONTEND §6.1):
  * - waiting: pendingUi non-empty (orange pulse dot)
  * - running: run is running / settling / compacting / retrying, or — for sessions this tab has

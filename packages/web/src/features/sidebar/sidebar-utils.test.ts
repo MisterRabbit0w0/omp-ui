@@ -9,6 +9,8 @@ import {
 	getAdjacentSessionId,
 	getSessionRowStatus,
 	groupSessionsByCwd,
+	previewGroupSessions,
+	SESSION_GROUP_PREVIEW_LIMIT,
 } from "./sidebar-utils";
 
 const SAMPLE_SESSIONS: SessionListItem[] = [
@@ -74,6 +76,30 @@ describe("sidebar-utils", () => {
 		expect(groups[0]?.label).toBe("omp-ui");
 		expect(groups[0]?.sessions.map(s => s.id)).toEqual(["s1", "s2"]);
 		expect(groups[1]?.label).toBe("oh-my-pi");
+	});
+
+	test("previewGroupSessions keeps the default list short, expands, and resets", () => {
+		const many = Array.from({ length: 9 }, (_, i) => ({ ...SAMPLE_SESSIONS[0]!, id: `m${i}` }));
+		const short = previewGroupSessions(many);
+		expect(short.sessions).toHaveLength(SESSION_GROUP_PREVIEW_LIMIT);
+		expect(short.hiddenCount).toBe(9 - SESSION_GROUP_PREVIEW_LIMIT);
+		expect(short.hasMore).toBe(true);
+
+		const expanded = previewGroupSessions(many, { expanded: true });
+		expect(expanded.sessions).toHaveLength(9);
+		expect(expanded.hiddenCount).toBe(0);
+		expect(expanded.hasMore).toBe(false);
+
+		// Reopening a workspace calls this again without `expanded`, so it starts short.
+		expect(previewGroupSessions(many).sessions.map(s => s.id)).toEqual(short.sessions.map(s => s.id));
+	});
+
+	test("previewGroupSessions always keeps the current session visible", () => {
+		const many = Array.from({ length: 8 }, (_, i) => ({ ...SAMPLE_SESSIONS[0]!, id: `m${i}` }));
+		const preview = previewGroupSessions(many, { currentSessionId: "m7" });
+		expect(preview.sessions.map(s => s.id)).toContain("m7");
+		expect(preview.sessions).toHaveLength(SESSION_GROUP_PREVIEW_LIMIT + 1);
+		expect(preview.hiddenCount).toBe(2);
 	});
 
 	test("getSessionRowStatus prioritizes waiting > running > error > unread > idle", () => {

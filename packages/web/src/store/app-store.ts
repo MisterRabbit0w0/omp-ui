@@ -138,6 +138,8 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 	let catalogWanted = false;
 	/** Sessions whose process is being replaced; the old process's exit must not mark the view dead. */
 	const restarting = new Set<string>();
+	/** In-flight lazy starts (background warm-up for previews, or send-time start) keyed by session id. */
+	const startingSessions = new Map<string, Promise<void>>();
 
 	const store = create<AppState>()((set, get) => {
 		/**
@@ -448,6 +450,13 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 							[item.id]: { ...createSessionView(item.id, { readonly: true, title: item.title }), messages },
 						},
 					}));
+					// Spawn in the background right away so the model/thinking selectors work before
+					// the first prompt (they need a live omp process; send-time lazy start was too late).
+					void get()
+						.startSession(item.id)
+						.catch(err => {
+							get().pushToast("error", err instanceof Error ? err.message : "会话启动失败");
+						});
 				} catch (err) {
 					get().pushToast("error", err instanceof Error ? err.message : "无法加载会话");
 				}
@@ -479,21 +488,31 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 				return sessionId;
 			},
 
-			/** Lazy start for a read-only preview / exited process (§3.1). */
+			/** Lazy start for a read-only preview / exited process (§3.1). Concurrent callers share one start. */
 			async startSession(sessionId: string): Promise<void> {
+				const inflight = startingSessions.get(sessionId);
+				if (inflight) return inflight;
 				const view = get().views[sessionId];
 				if (!view || (view.proc !== "none" && view.proc !== "exited" && view.proc !== "crashed")) return;
 				const item = get().sessions.find(s => s.id === sessionId);
 				if (!item) throw new Error(`unknown session ${sessionId}`);
-				await attachAndStart(sessionId, {
-					cwd: item.cwd,
-					resume: item.file,
-					restore: view.proc === "crashed",
-					model: get().config?.defaultModel,
-					thinking: get().config?.defaultThinking,
-					approvalMode: view.approvalMode ?? get().config?.defaultApprovalMode,
-				});
-				updateView(sessionId, v => ({ ...v, readonly: false, approvalMode: v.approvalMode ?? get().config?.defaultApprovalMode }));
+				const task = (async () => {
+					await attachAndStart(sessionId, {
+						cwd: item.cwd,
+						resume: item.file,
+						restore: view.proc === "crashed",
+						model: get().config?.defaultModel,
+						thinking: get().config?.defaultThinking,
+						approvalMode: view.approvalMode ?? get().config?.defaultApprovalMode,
+					});
+					updateView(sessionId, v => ({ ...v, readonly: false, approvalMode: v.approvalMode ?? get().config?.defaultApprovalMode }));
+				})();
+				startingSessions.set(sessionId, task);
+				try {
+					await task;
+				} finally {
+					startingSessions.delete(sessionId);
+				}
 			},
 
 			startWelcome(cwd?: string): void {
@@ -622,7 +641,9 @@ export function createAppStore(deps?: Partial<AppDeps>) {
 			async sendPrompt(sessionId: string, text: string, opts: SendOptions = {}): Promise<void> {
 				const view = get().views[sessionId];
 				if (!view) return;
-				if (view.readonly || view.proc === "none" || view.proc === "exited" || view.proc === "crashed") {
+				const inflightStart = startingSessions.get(sessionId);
+				if (inflightStart) await inflightStart;
+				else if (view.readonly || view.proc === "none" || view.proc === "exited" || view.proc === "crashed") {
 					await get().startSession(sessionId);
 				}
 				const c = requireClient();

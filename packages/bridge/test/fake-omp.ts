@@ -48,7 +48,7 @@ const messages: Record<string, unknown>[] = [];
 let lastEntryId: string | null = null;
 let headerWritten = false;
 let entrySeq = 0;
-const currentModel = argAfter("--model") ?? "fake/model";
+let currentModel = argAfter("--model") ?? "fake/model";
 let currentThinking = argAfter("--thinking") ?? "high";
 if (rich) {
 	const resumeFile = argAfter("--resume") ?? argAfter("--restore");
@@ -443,6 +443,13 @@ const handleRich = (cmd: Record<string, unknown>): boolean => {
 			if (typeof cmd.level === "string") currentThinking = cmd.level;
 			respond(id, type);
 			return true;
+		case "set_model": {
+			const provider = typeof cmd.provider === "string" ? cmd.provider : "fake";
+			const modelId = typeof cmd.modelId === "string" ? cmd.modelId : "";
+			currentModel = `${provider}/${modelId}`;
+			respond(id, type, activeModel());
+			return true;
+		}
 		case "prompt":
 			respond(id, type);
 			void runRichPrompt(id, typeof cmd.message === "string" ? cmd.message : "");

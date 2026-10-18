@@ -820,6 +820,7 @@ export function modelButtonLabel(model: ModelInfo | null | undefined, defaultMod
 export function shortModelName(model?: ModelInfo | null, fallback = NO_MODEL_LABEL): string {
 	if (!model) return fallback;
 	const raw = model.id || model.name;
+	if (!raw) return fallback;
 	return raw
 		.replace(/^claude-/, "")
 		.replace(/-\d{8}$/, "");

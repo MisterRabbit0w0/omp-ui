@@ -1,12 +1,22 @@
+import type { Page } from "@playwright/test";
 import { approveBtn, approvalCard, expect, send, sidebar, test, text } from "./fixtures";
 
-test("open fixture session read-only, then send (lazy start with --resume)", async ({ app }) => {
+const popover = (page: Page) => page.getByRole("dialog").last();
+
+test("opening a fixture session warms the process; model switches before the first send", async ({ app }) => {
 	await sidebar(app).getByText("Fixture rich session").click();
 	// read-only transcript: text, tool rows, code
 	await expect(text(app, "Reading then editing.")).toBeVisible();
 	await expect(text(app, "const answer = 42;")).toBeVisible();
 	await expect(app.locator("[data-tool-call-id]")).toHaveCount(2);
 	await expect(approvalCard(app)).toHaveCount(0);
+
+	// The background spawn/attach finished without sending: models and thinking are selectable.
+	await expect(app.getByRole("button", { name: /^模型：model，/ })).toBeVisible();
+	await app.getByRole("button", { name: /^模型：/ }).click();
+	await popover(app).getByRole("button", { name: /model-mini/ }).click();
+	await expect(app.getByRole("button", { name: /^模型：model-mini/ })).toBeVisible();
+	await app.keyboard.press("Escape");
 
 	await send(app, "continue please");
 	await expect(approvalCard(app)).toBeVisible();

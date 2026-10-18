@@ -41,9 +41,9 @@ export function saveAppearancePrefs(prefs: AppearancePrefs): void {
 
 export function applyAppearancePrefs(prefs: AppearancePrefs): void {
 	if (typeof document === "undefined") return;
-	// Never touch the root font-size: Tailwind spacing/heights are rem and must stay at 16px (FRONTEND §2.5).
-	// `body` reads this variable for its text size instead.
-	document.documentElement.style.setProperty("--app-font-size", `${prefs.fontSize}px`);
+	// Keep the 16px rem root so Tailwind spacing/heights stay fixed (FRONTEND §2.5); the
+	// setting scales every pixel text size through `--app-font-scale` in base.css instead.
+	document.documentElement.style.setProperty("--app-font-scale", String(prefs.fontSize / DEFAULT_APPEARANCE_PREFS.fontSize));
 	document.documentElement.toggleAttribute("data-compact", prefs.compact);
 }
 

@@ -267,7 +267,7 @@ export function AssistantTurnView({
 	};
 
 	return (
-		<div className={"group/turn flex flex-col gap-2.5 " + (animateOnMount ? "anim-fade-up" : "")}>
+		<div className={"group/turn turn-stack flex flex-col gap-2.5 " + (animateOnMount ? "anim-fade-up" : "")}>
 			{segments.map((seg, idx) => {
 				if (seg.kind === "thinking") {
 					return (
@@ -408,7 +408,7 @@ export function DraftTurnView({
 	const toolGroups = buildToolGroups(draftTools);
 
 	return (
-		<div className="flex flex-col gap-2.5">
+		<div className="turn-stack flex flex-col gap-2.5">
 			{thinkingBlocks.map((tb, i) => (
 				<ThinkingBlock
 					key={`d-think-${i}`}

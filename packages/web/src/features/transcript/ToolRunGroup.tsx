@@ -563,7 +563,7 @@ export function ToolRunGroup({
 
 			<Collapsible open={open} duration={300}>
 				<div className="-mx-1.5 px-1.5 pb-1">
-					<div className="mt-1 flex flex-col gap-1">
+					<div className="mt-1 flex flex-col gap-1 tool-rows">
 						{groups.map((grp, idx) => {
 							if (grp.readOnlyCollapsed) {
 								return (

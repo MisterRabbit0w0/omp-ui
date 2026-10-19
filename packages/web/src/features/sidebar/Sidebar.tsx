@@ -20,6 +20,7 @@ import type { ConnectionState } from "@/lib/ws";
 import { useAppStore } from "@/store/app-store";
 import { getBridge, updateSessionView } from "@/store/bridge-access";
 import type { SessionView } from "@/store/session-reducer";
+import { BrandMark } from "@/ui/BrandMark";
 import { IconButton } from "@/ui/Button";
 import { Kbd } from "@/ui/Chip";
 import {
@@ -436,8 +437,8 @@ export function Sidebar({
 		<aside aria-label="会话" className="side flex h-full min-h-0 flex-col bg-app-side p-2 select-none">
 			{/* Top brand row (§6.1) */}
 			<div className="flex h-11 shrink-0 items-center gap-2.5 px-1.5">
-				<div className="grid size-7 shrink-0 place-items-center rounded-[8px] bg-ink text-[14px] font-semibold text-surface">
-					π
+				<div className="grid size-7 shrink-0 place-items-center rounded-[8px] bg-ink text-surface">
+					<BrandMark size={18} />
 				</div>
 				<div className="min-w-0">
 					<div className="text-[13px] font-medium leading-tight text-ink">omp</div>

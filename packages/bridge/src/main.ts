@@ -5,6 +5,8 @@
  * (open the browser). This service is equivalent to local code execution —
  * never expose it through a reverse proxy (docs/DESIGN.md §3.7).
  */
+import fs from "node:fs";
+import path from "node:path";
 import { createBridge } from "./server";
 import { checkOmpVersion, resolveOmpCommand } from "./process";
 
@@ -26,8 +28,13 @@ try {
 	process.exit(1);
 }
 
+// Published package layout: dist/cli.js + dist/web/. In the repo this path does
+// not exist and server.ts falls back to packages/web/dist.
+const bundledWeb = path.resolve(import.meta.dir, "web");
+
 const bridge = await createBridge({
 	...(port !== undefined ? { port } : {}),
+	...(fs.existsSync(path.join(bundledWeb, "index.html")) ? { webDist: bundledWeb } : {}),
 	ompCommand,
 	ompVersion,
 });
